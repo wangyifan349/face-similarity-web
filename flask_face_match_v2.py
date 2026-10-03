@@ -595,10 +595,10 @@ def _load_library_full(
     relative_paths: list = []
     alive_keys: set = set()
 
-    # One search at a time: the CNN detector is single threaded inside dlib
-    # and two encoders at once would only make both of them slower.
-    with _LIBRARY_LOCK:
-        for index, path in enumerate(paths, start=1):
+    # Allow concurrent library loads to support opening multiple windows/tabs.
+    # The CNN detector is still single-threaded internally, but not serializing
+    # different requests avoids blocking unrelated tabs when one is slow.
+    for index, path in enumerate(paths, start=1):
             if show_progress:
                 print(f"  Loading library {index}/{len(paths)}  {path.name}", flush=True)
 
@@ -611,7 +611,7 @@ def _load_library_full(
                 rows.append(descriptor)
                 relative_paths.append(relative_path)
 
-        _forget_deleted_files(mode, alive_keys)
+    _forget_deleted_files(mode, alive_keys)
 
     if not rows:
         return (
