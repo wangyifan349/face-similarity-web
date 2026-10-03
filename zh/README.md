@@ -346,6 +346,16 @@ InsightFace 版（本机启动时报告的执行提供程序为 CPUExecutionProv
 
 > ⚠️ 上述数值随硬件配置、图像尺寸与图片内容变化，部署前请在目标环境自行完成基准测试。InsightFace 各阶段的单独耗时未逐项拆分测量。
 
+### 🧮 关于 FAISS 检索加速
+
+本项目**不使用 FAISS**，人脸库检索走 NumPy 的精确矩阵乘法（`库内脸数 × 查询脸数` 的余弦相似度）。这是有意的选择：
+
+- FAISS 的 `IndexFlatIP` 是**精确**索引，与当前的矩阵乘法结果完全一致，只是把同一件事换了个实现，并不会更快；实测中 500 个候选的相似度计算本身只要约 0.5 ms，本来就不是瓶颈。
+- 真正的瓶颈在**人脸检测**（见上表），而 FAISS 不参与检测。
+- 引入 FAISS 会增加一个约 456 行的依赖与索引生命周期管理（增删改、同步、持久化），收益却接近零。
+
+只有当人脸库规模大到**万级以上**、且确实被检索延迟卡住时，才值得换成 FAISS 的近似索引（`IVF` / `HNSW`）。届时的正确做法是先把检测的耗时降下来，再评估检索是否真的成了瓶颈。
+
 ---
 
 ## 🔌 HTTP 接口
@@ -356,8 +366,40 @@ InsightFace 版（本机启动时报告的执行提供程序为 CPUExecutionProv
 | --- | --- | --- |
 | GET | `/` | 返回网页界面 |
 | GET | `/api/library` | 人脸库规模统计，**仅返回数量，不返回目录路径** |
+| GET | `/api/health` | 就绪探针：只数图片数量，**不做特征提取**，可高频轮询 |
+| GET | `/api/stats` | 运行配置：特征维度、阈值口径、库规模、依赖版本、缺失模型 |
 | POST | `/api/query-set` | 查询图与本次上传的候选图比对（1:N） |
 | POST | `/api/query-library` | 查询图与人脸库全量比对（1:N） |
+| GET | `/library-image/<相对路径>` | 取人脸库中一张图片，用于结果表缩略图 |
+| GET | `/library-image-download/<相对路径>` | 同上，但作为下载返回（`Content-Disposition: attachment`） |
+
+> 📌 图片路由只接受**人脸库内部**的相对路径，由 `send_from_directory` 解析，任何试图跳出库目录的写法（如 `../../`）都会被拒绝（403/404）。库目录的绝对路径不会出现在任何响应里。
+
+### 🩺 `/api/health`
+
+只统计文件夹里的图片数量，不加载模型、不提取特征，因此开销极小，适合做存活/就绪探针。`ready` 为 `true` 表示库里至少有一张图片；这些图片里是否真的有人脸，要到实际检索时才知道。
+
+```json
+{ "ok": true, "ready": true, "images": 128, "detector": "cnn", "descriptor_dimension": 128 }
+```
+
+`detector` 与 `descriptor_dimension` **仅 dlib 版返回**。
+
+### 📊 `/api/stats`
+
+返回这台机器上**实际生效**的配置，用于排查「同一张图在两台机器上分数不同」这类问题。字段按版本略有差异，共同部分：
+
+| 字段 | 说明 |
+| --- | --- |
+| `descriptor_dimension` | 特征维度：dlib 版 `128`，InsightFace 版 `512` |
+| `threshold_metric` | 阈值口径，固定为 `cosine_similarity` |
+| `sort_order` | 排序方向，固定为 `cosine_similarity_descending`（越大越像） |
+| `library_images` / `library_faces` | 库内图片数 / 检出的人脸数 |
+| `max_upload_mb` | 单次请求体上限（MB） |
+| `missing_models` | 缺失的模型文件名列表，为空表示模型齐全 |
+| `opencv_version` / `numpy_version` | 依赖版本 |
+| `detector` / `dlib_cuda` / `configuration` | **仅 dlib 版** |
+| `onnxruntime_version` / `onnxruntime_providers` / `model_directory_present` / `model_summary` | **仅 InsightFace 版** |
 
 ### 🔧 通用参数
 
@@ -404,11 +446,14 @@ InsightFace 版（本机启动时报告的执行提供程序为 CPUExecutionProv
 
 `kind` 字段的取值：`query-set` 为「候选图片」，`query-library` 为「库中候选」。
 
+> 🖼️ `matches` 中每一行还可能带一个 `image_url`：指向该行照片在 `/library-image/` 下的地址，页面用它显示缩略图。**只有人脸库检索（`query-library`）的行才有**；上传比对的候选图没有对应文件，因此该字段不会出现。
+
 ### ❌ 常见错误
 
 | 状态码 | 场景 |
 | --- | --- |
 | 400 | 未选择查询图、查询图多张、未选择候选图、候选图无可用人脸、人脸库为空、库中无人脸 |
+| 403 / 404 | 图片路由的路径试图跳出人脸库目录 |
 | 413 | 请求体超过 64 MB |
 | 500 | dlib 版缺少 CNN 检测器权重却仍在 CNN 模式下处理请求 |
 
@@ -419,7 +464,7 @@ InsightFace 版（本机启动时报告的执行提供程序为 CPUExecutionProv
 - ⚠️ **本项目不提供身份判定结论。** 仅输出相似度数值；「是否同一人」的阈值选择与由此产生的误判责任由使用方承担。
 - 🌐 **服务默认监听 `0.0.0.0`**，同一局域网内的其他主机均可访问。若仅限本机访问，请修改文件末尾 `app.run(...)` 中的 `host` 为 `127.0.0.1`。⚠️ 注意：终端打印的地址始终是 `http://127.0.0.1:<port>`，即使实际监听的是全部网卡——请勿以此判断暴露范围。
 - 🧠 **上传图片不落盘**：仅在内存中解码与计算，进程退出即释放。人脸库图片则被读取并缓存于进程内存。
-- 🕵️ **人脸库路径不外泄**：页面与接口均不展示、不接受该参数，路径仅存在于服务端进程内部（`/api/library` 只返回数量）。
+- 🕵️ **人脸库路径不外泄**：页面与接口均不展示、不接受该参数，路径仅存在于服务端进程内部（`/api/library` 只返回数量）。结果表缩略图走 `/library-image/<相对路径>`，只暴露库内相对路径，`send_from_directory` 会拒绝任何跳出库目录的路径。
 - 🕳️ **无鉴权机制**：程序未内置身份认证与访问控制。若部署于不可信网络，请务必在反向代理层补充鉴权措施。
 - 🐌 **不建议使用网络共享目录作为人脸库**：大量小文件的网络 I/O 会显著劣化性能。
 - ⚠️ **内置服务器为 Flask 开发服务器**，仅适用于内网小规模使用；生产环境请置于 Gunicorn、uWSGI 等 WSGI 服务器之后。

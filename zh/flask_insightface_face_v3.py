@@ -40,11 +40,18 @@ import time
 import warnings
 from pathlib import Path
 from typing import Optional, Sequence, Union
+from urllib.parse import quote
 
 import cv2
 import numpy as np
 import onnxruntime
-from flask import Flask, jsonify, render_template_string, request
+from flask import (
+    Flask,
+    jsonify,
+    render_template_string,
+    request,
+    send_from_directory,
+)
 
 # 只加载 buffalo_l 里的检测和识别两个模型。关键点和性别年龄模型用不上，
 # 加载它们只会拖慢启动。
@@ -61,6 +68,11 @@ warnings.filterwarnings("ignore", category=FutureWarning, module="insightface.*"
 
 # 人脸库文件夹，由启动时的询问填进来；之后一直用它。
 LIBRARY_FOLDER = SCRIPT_DIRECTORY / "face_library"
+
+# 结果表里每行显示一张缩略图，浏览器就得能把这些图片再要回来一次。只开放
+# 路由，不开放文件夹：请求里能写下的，只是人脸库内部的一个相对路径。
+LIBRARY_IMAGE_ROUTE = "/library-image"
+LIBRARY_IMAGE_DOWNLOAD_ROUTE = "/library-image-download"
 
 # 已加载的 FaceAnalysis。构造它要两秒多，所以只做一次，之后每个请求都用它。
 FACE_APP = None
@@ -388,15 +400,16 @@ def _embeddings_of(path: Path) -> list:
     return faces
 
 
-def load_library() -> tuple:
-    """人脸库里每一张脸，返回 (名字列表, 特征矩阵)。
+def _load_library_full() -> tuple:
+    """人脸库里每一张脸，返回 (名字列表, 特征矩阵, 相对路径列表)。
 
-    名字就是文件名；一张照片里有好几张脸时后面加 " #2"、" #3"。特征矩阵
-    一行对应一个名字，顺序一致。
+    相对路径是每张脸来自哪张照片在人脸库里的位置，一行对一个名字，顺序一
+    致。它存在只是为了让结果行能指回它写的那张照片，绝对路径始终不外传。
     """
     images = library_images()
     labels = []
     embeddings = []
+    relative_paths = []
     alive = []
 
     # 一次只让一个人扫库：ONNX 会话和检测网络都怕两个请求挤在一起。
@@ -406,6 +419,7 @@ def load_library() -> tuple:
                 print(f"  载入人脸库 {index}/{len(images)}  {path.name}", flush=True)
 
             alive.append(str(path))
+            relative_path = path.relative_to(LIBRARY_FOLDER).as_posix()
             position = 0
             for embedding in _embeddings_of(path):
                 position += 1
@@ -414,6 +428,7 @@ def load_library() -> tuple:
                 else:
                     labels.append(f"{path.name} #{position}")
                 embeddings.append(embedding)
+                relative_paths.append(relative_path)
 
         # 从人脸库里删掉的图，缓存也一起清掉。
         for key in list(LIBRARY_CACHE):
@@ -421,8 +436,27 @@ def load_library() -> tuple:
                 del LIBRARY_CACHE[key]
 
     if not embeddings:
-        return labels, np.zeros((0, 512), dtype="float32")
-    return labels, np.vstack(embeddings).astype("float32")
+        return labels, np.zeros((0, 512), dtype="float32"), relative_paths
+    return labels, np.vstack(embeddings).astype("float32"), relative_paths
+
+
+def load_library() -> tuple:
+    """人脸库里每一张脸，返回 (名字列表, 特征矩阵)。
+
+    名字就是文件名；一张照片里有好几张脸时后面加 " #2"、" #3"。特征矩阵
+    一行对应一个名字，顺序一致。
+    """
+    labels, matrix, _relative_paths = _load_library_full()
+    return labels, matrix
+
+
+def library_image_url(relative_path: str) -> str:
+    """一张人脸库照片给浏览器用的地址。
+
+    路径要转义：子文件夹的名字里可能有空格或中文，这在文件夹名里是合法的，
+    在 URL 里也合法，只是得先转义。
+    """
+    return f"{LIBRARY_IMAGE_ROUTE}/{quote(relative_path)}"
 
 
 # =============================================================================
@@ -436,6 +470,7 @@ def rank_matches(
     candidate_faces: Sequence,
     group_label: str,
     top_results: int,
+    image_paths: Optional[Sequence] = None,
 ) -> list:
     """每个候选都跟查询图比一遍，只留下前几名。
 
@@ -445,6 +480,9 @@ def rank_matches(
 
     返回的行是 {"rank", "kind", "candidate", "similarity"}，第一名多一个
     "best": True。没有候选就返回空列表。
+
+    image_paths 给了的话，是每个名字对应的库内照片，顺序一致，每行就多带一个
+    缩略图地址；没给的行（比如本次上传的候选图）本来就没有图可显示。
     """
     scores = best_scores_percent(query_faces, candidate_faces)
     order = np.argsort(-scores)
@@ -453,14 +491,15 @@ def rank_matches(
     matches = []
     for position in range(count):
         index = int(order[position])
-        matches.append(
-            {
-                "rank": position + 1,
-                "kind": group_label,
-                "candidate": labels[index],
-                "similarity": round(float(scores[index]), 2),
-            }
-        )
+        row = {
+            "rank": position + 1,
+            "kind": group_label,
+            "candidate": labels[index],
+            "similarity": round(float(scores[index]), 2),
+        }
+        if image_paths is not None:
+            row["image_url"] = library_image_url(image_paths[index])
+        matches.append(row)
     if matches:
         matches[0]["best"] = True
     return matches
@@ -685,6 +724,11 @@ PAGE = """
   }
   .bar { height: 6px; border-radius: 3px; background: #f1e2d6; overflow: hidden; }
   .bar > span { display: block; height: 100%; background: var(--brand); }
+  .thumb {
+    width: 2.75rem; height: 2.75rem; object-fit: cover;
+    border-radius: .35rem; border: 1px solid #f1e2d6; background: #faf5f1;
+    display: block;
+  }
   .alert-brand { background: var(--brand-tint); border: 1px solid #f3c9a8; color: #7a2e0a; }
   .empty-state { color: #a8968a; font-size: .92rem; }
   .thumb { max-height: 88px; border-radius: 6px; border: 1px solid #e6dbd1; }
@@ -825,9 +869,14 @@ function resultTable(rows) {
   // always matches the percentage printed next to it.
   const body = rows.map((row) => {
     const span = Math.max(0, Math.min(100, row.similarity));
+    // 没有 image_url 的行是本次上传的候选图，不是库里的照片，没有图可显示。
+    const thumb = row.image_url
+      ? `<img class="thumb" src="${encodeURI(row.image_url)}" alt="" loading="lazy">`
+      : "";
     return `
     <tr${row.best ? ' class="table-warning"' : ''}>
       <td style="width:4rem">${row.rank}</td>
+      <td style="width:3.5rem">${thumb}</td>
       <td>${escapeHtml(row.candidate)}</td>
       <td style="width:9rem">
         <span class="badge badge-score">${row.similarity.toFixed(2)}%</span>
@@ -838,7 +887,7 @@ function resultTable(rows) {
     </tr>`;
   }).join("");
   return `<table class="table table-sm align-middle mb-0">
-    <thead><tr><th>排名</th><th>${escapeHtml(rows[0].kind || "候选")}</th><th>相似度</th><th></th></tr></thead>
+    <thead><tr><th>排名</th><th></th><th>${escapeHtml(rows[0].kind || "候选")}</th><th>相似度</th><th></th></tr></thead>
     <tbody>${body}</tbody></table>
     <p class="form-text mt-2 mb-0">横条长度就是相似度百分比，满条为 100%。</p>`;
 }
@@ -995,6 +1044,78 @@ def api_library():
     )
 
 
+@app.get("/api/health")
+def api_health():
+    """给脚本和进程管理器用的"准备好了吗"。
+
+    故意做得很轻：只数人脸库里的图片，不做任何特征提取，所以探针可以每几秒
+    问一次而不花掉一次人脸检测。"ready" 表示文件夹里至少有一张图；这些图里
+    到底有没有人脸，那是真正检索的时候才揭晓的事。
+    """
+    images = library_images()
+    return jsonify(
+        {
+            "ok": True,
+            "ready": bool(images),
+            "images": len(images),
+            "descriptor_dimension": 512,
+        }
+    )
+
+
+@app.get("/api/stats")
+def api_stats():
+    """这台机器上服务此刻实际在用的配置。
+
+    决定分数的那些设置（模型、特征维度、阈值方向、库的大小），以及版本号。
+    两台机器给出不同结果、又想知道为什么的时候，看它就够了。人脸库文件夹
+    只报名字，不报路径。
+    """
+    directory = find_model_directory()
+    _labels, matrix, _image_paths = _load_library_full()
+
+    missing = (
+        list(REQUIRED_MODEL_FILES)
+        if directory is None
+        else [name for name in REQUIRED_MODEL_FILES if not (directory / name).is_file()]
+    )
+
+    return jsonify(
+        {
+            "ok": True,
+            "library_images": len(library_images()),
+            "library_faces": int(matrix.shape[0]),
+            "descriptor_dimension": 512,
+            "threshold_metric": "cosine_similarity",
+            "sort_order": "cosine_similarity_descending",
+            "max_upload_mb": app.config["MAX_CONTENT_LENGTH"] // (1024 * 1024),
+            "onnxruntime_version": onnxruntime.__version__,
+            "onnxruntime_providers": onnxruntime.get_available_providers(),
+            "opencv_version": cv2.__version__,
+            "numpy_version": np.__version__,
+            "model_directory_present": directory is not None,
+            "missing_models": missing,
+            "model_summary": MODEL_SUMMARY,
+        }
+    )
+
+
+@app.get(LIBRARY_IMAGE_ROUTE + "/<path:relative_path>")
+def library_image(relative_path: str):
+    """人脸库里的一张照片，给结果表里的缩略图用。
+
+    send_from_directory 会把路径定在人脸库文件夹内，并且拒绝任何想往外爬
+    的写法，所以无论路径怎么拼，都碰不到机器上别的文件。
+    """
+    return send_from_directory(LIBRARY_FOLDER, relative_path)
+
+
+@app.get(LIBRARY_IMAGE_DOWNLOAD_ROUTE + "/<path:relative_path>")
+def library_image_download(relative_path: str):
+    """同一张照片的下载形式，方便某一行被存下来或者单独打开。"""
+    return send_from_directory(LIBRARY_FOLDER, relative_path, as_attachment=True)
+
+
 @app.post("/api/query-set")
 def api_query_set():
     """面板一：查询图跟这次一起上传的候选图比。"""
@@ -1055,7 +1176,7 @@ def api_query_library():
     if not library_images():
         raise RequestError("人脸库里没有图片，请先放入图片后重试")
 
-    labels, embedding_matrix = load_library()
+    labels, embedding_matrix, image_paths = _load_library_full()
     if embedding_matrix.shape[0] == 0:
         raise RequestError("人脸库里没有检测到人脸，请先放入带人脸的图片后重试")
 
@@ -1073,6 +1194,7 @@ def api_query_library():
                 embedding_matrix,
                 "库中候选",
                 top_results_from_request(),
+                image_paths,
             ),
             "elapsed_ms": int((time.perf_counter() - started) * 1000),
         }

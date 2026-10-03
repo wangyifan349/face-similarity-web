@@ -47,11 +47,18 @@ import time
 import warnings
 from pathlib import Path
 from typing import Optional, Sequence, Union
+from urllib.parse import quote
 
 import cv2
 import numpy as np
 import onnxruntime
-from flask import Flask, jsonify, render_template_string, request
+from flask import (
+    Flask,
+    jsonify,
+    render_template_string,
+    request,
+    send_from_directory,
+)
 
 # Only the detection and recognition models of buffalo_l are loaded. The
 # landmarks and the gender/age models are never used, and loading them would
@@ -71,6 +78,12 @@ warnings.filterwarnings("ignore", category=FutureWarning, module="insightface.*"
 # The face library folder, filled in by the question asked at startup; it is
 # used from then on.
 LIBRARY_FOLDER = SCRIPT_DIRECTORY / "face_library"
+
+# The result table shows a thumbnail per row, so the browser has to be able
+# to fetch those pictures back. Only the route is exposed, never the folder:
+# all a request can name is a relative path from inside the library.
+LIBRARY_IMAGE_ROUTE = "/library-image"
+LIBRARY_IMAGE_DOWNLOAD_ROUTE = "/library-image-download"
 
 # The already loaded FaceAnalysis. Building it takes more than two seconds, so
 # it is built once and every request then uses it.
@@ -414,16 +427,18 @@ def _embeddings_of(path: Path) -> list:
     return faces
 
 
-def load_library() -> tuple:
-    """Every face in the library, returned as (list of labels, descriptor
-    matrix).
+def _load_library_full() -> tuple:
+    """Every face in the library as (labels, descriptor matrix, relative paths).
 
-    A label is the file name; when one photo holds several faces " #2" and
-    " #3" are appended. The matrix has one row per label, in the same order.
+    The relative paths are the in-library location of the photo each label came
+    from, one per label, in the same order. They exist so a result row can
+    point back at the picture it names, while the absolute folder path never
+    leaves the server.
     """
     images = library_images()
     labels = []
     embeddings = []
+    relative_paths = []
     alive = []
 
     # One library scan at a time: the ONNX session and the detection network
@@ -434,6 +449,7 @@ def load_library() -> tuple:
                 print(f"  Loading library {index}/{len(images)}  {path.name}", flush=True)
 
             alive.append(str(path))
+            relative_path = path.relative_to(LIBRARY_FOLDER).as_posix()
             position = 0
             for embedding in _embeddings_of(path):
                 position += 1
@@ -442,6 +458,7 @@ def load_library() -> tuple:
                 else:
                     labels.append(f"{path.name} #{position}")
                 embeddings.append(embedding)
+                relative_paths.append(relative_path)
 
         # Images deleted from the library have their cache entries dropped too.
         for key in list(LIBRARY_CACHE):
@@ -449,8 +466,29 @@ def load_library() -> tuple:
                 del LIBRARY_CACHE[key]
 
     if not embeddings:
-        return labels, np.zeros((0, 512), dtype="float32")
-    return labels, np.vstack(embeddings).astype("float32")
+        return labels, np.zeros((0, 512), dtype="float32"), relative_paths
+    return labels, np.vstack(embeddings).astype("float32"), relative_paths
+
+
+def load_library() -> tuple:
+    """Every face in the library, returned as (list of labels, descriptor
+    matrix).
+
+    A label is the file name; when one photo holds several faces " #2" and
+    " #3" are appended. The matrix has one row per label, in the same order.
+    """
+    labels, matrix, _relative_paths = _load_library_full()
+    return labels, matrix
+
+
+def library_image_url(relative_path: str) -> str:
+    """The browser-visible URL of one library photo.
+
+    The path is quoted because a photo may sit in a subfolder whose name holds
+    a space or a non-ASCII character, both of which are legal in a folder name
+    and legal in a URL once quoted.
+    """
+    return f"{LIBRARY_IMAGE_ROUTE}/{quote(relative_path)}"
 
 
 # =============================================================================
@@ -464,6 +502,7 @@ def rank_matches(
     candidate_faces: Sequence,
     group_label: str,
     top_results: int,
+    image_paths: Optional[Sequence] = None,
 ) -> list:
     """Score every candidate against the query image and keep only the top few.
 
@@ -475,6 +514,10 @@ def rank_matches(
     The rows returned are {"rank", "kind", "candidate", "similarity"}, with
     "best": True added to the first one. An empty list comes back when there
     are no candidates.
+
+    When image_paths is given it holds the library photo behind each label, in
+    the same order, and every row also carries the URL of its thumbnail. Rows
+    without one (uploaded candidates, for instance) have no picture to show.
     """
     scores = best_scores_percent(query_faces, candidate_faces)
     order = np.argsort(-scores)
@@ -483,14 +526,15 @@ def rank_matches(
     matches = []
     for position in range(count):
         index = int(order[position])
-        matches.append(
-            {
-                "rank": position + 1,
-                "kind": group_label,
-                "candidate": labels[index],
-                "similarity": round(float(scores[index]), 2),
-            }
-        )
+        row = {
+            "rank": position + 1,
+            "kind": group_label,
+            "candidate": labels[index],
+            "similarity": round(float(scores[index]), 2),
+        }
+        if image_paths is not None:
+            row["image_url"] = library_image_url(image_paths[index])
+        matches.append(row)
     if matches:
         matches[0]["best"] = True
     return matches
@@ -718,6 +762,11 @@ PAGE = """
   }
   .bar { height: 6px; border-radius: 3px; background: #f1e2d6; overflow: hidden; }
   .bar > span { display: block; height: 100%; background: var(--brand); }
+  .thumb {
+    width: 2.75rem; height: 2.75rem; object-fit: cover;
+    border-radius: .35rem; border: 1px solid #f1e2d6; background: #faf5f1;
+    display: block;
+  }
   .alert-brand { background: var(--brand-tint); border: 1px solid #f3c9a8; color: #7a2e0a; }
   .empty-state { color: #a8968a; font-size: .92rem; }
   .thumb { max-height: 88px; border-radius: 6px; border: 1px solid #e6dbd1; }
@@ -858,9 +907,15 @@ function resultTable(rows) {
   // always matches the percentage printed next to it.
   const body = rows.map((row) => {
     const span = Math.max(0, Math.min(100, row.similarity));
+    // Rows without an image_url are uploaded candidates rather than library
+    // photos, and there is no picture to show for those.
+    const thumb = row.image_url
+      ? `<img class="thumb" src="${encodeURI(row.image_url)}" alt="" loading="lazy">`
+      : "";
     return `
     <tr${row.best ? ' class="table-warning"' : ''}>
       <td style="width:4rem">${row.rank}</td>
+      <td style="width:3.5rem">${thumb}</td>
       <td>${escapeHtml(row.candidate)}</td>
       <td style="width:9rem">
         <span class="badge badge-score">${row.similarity.toFixed(2)}%</span>
@@ -871,7 +926,7 @@ function resultTable(rows) {
     </tr>`;
   }).join("");
   return `<table class="table table-sm align-middle mb-0">
-    <thead><tr><th>Rank</th><th>${escapeHtml(rows[0].kind || "Candidate")}</th><th>Similarity</th><th></th></tr></thead>
+    <thead><tr><th>Rank</th><th></th><th>${escapeHtml(rows[0].kind || "Candidate")}</th><th>Similarity</th><th></th></tr></thead>
     <tbody>${body}</tbody></table>
     <p class="form-text mt-2 mb-0">The bar length is the similarity percentage; a full bar is 100%.</p>`;
 }
@@ -1020,7 +1075,7 @@ def api_library():
     Only the counts are returned; the folder path itself never leaves the
     server.
     """
-    _labels, embedding_matrix = load_library()
+    _labels, embedding_matrix, _image_paths = _load_library_full()
     return jsonify(
         {
             "ok": True,
@@ -1028,6 +1083,81 @@ def api_library():
             "faces": int(embedding_matrix.shape[0]),
         }
     )
+
+
+@app.get("/api/health")
+def api_health():
+    """A readiness answer for scripts and process managers.
+
+    Cheap on purpose: it counts the library folder but does not load a model or
+    encode anything, so a probe can run every few seconds for free. "ready"
+    turns true once the folder holds at least one image; whether those images
+    actually contain faces is what a real search finds out.
+    """
+    images = library_images()
+    return jsonify(
+        {
+            "ok": True,
+            "ready": bool(images),
+            "images": len(images),
+            "descriptor_dimension": 512,
+        }
+    )
+
+
+@app.get("/api/stats")
+def api_stats():
+    """What the service is running with right now.
+
+    The settings that decide a score - descriptor size, threshold direction,
+    model files - plus the size of the library. Useful when two machines answer
+    differently and you need to know why. The library folder itself is never
+    reported as a path.
+    """
+    directory = find_model_directory()
+    _labels, matrix, _image_paths = _load_library_full()
+
+    missing = (
+        list(REQUIRED_MODEL_FILES)
+        if directory is None
+        else [name for name in REQUIRED_MODEL_FILES if not (directory / name).is_file()]
+    )
+
+    return jsonify(
+        {
+            "ok": True,
+            "library_images": len(library_images()),
+            "library_faces": int(matrix.shape[0]),
+            "descriptor_dimension": 512,
+            "threshold_metric": "cosine_similarity",
+            "sort_order": "cosine_similarity_descending",
+            "max_upload_mb": app.config["MAX_CONTENT_LENGTH"] // (1024 * 1024),
+            "onnxruntime_version": onnxruntime.__version__,
+            "onnxruntime_providers": onnxruntime.get_available_providers(),
+            "opencv_version": cv2.__version__,
+            "numpy_version": np.__version__,
+            "model_directory_present": directory is not None,
+            "missing_models": missing,
+            "model_summary": MODEL_SUMMARY,
+        }
+    )
+
+
+@app.get(LIBRARY_IMAGE_ROUTE + "/<path:relative_path>")
+def library_image(relative_path: str):
+    """One photo of the face library, for the thumbnail in the result table.
+
+    send_from_directory resolves the path inside the library folder and
+    refuses anything that climbs out of it, so a request cannot reach a file
+    elsewhere on the machine however the path is spelled.
+    """
+    return send_from_directory(LIBRARY_FOLDER, relative_path)
+
+
+@app.get(LIBRARY_IMAGE_DOWNLOAD_ROUTE + "/<path:relative_path>")
+def library_image_download(relative_path: str):
+    """The same photo as a download, so a row can be saved or opened."""
+    return send_from_directory(LIBRARY_FOLDER, relative_path, as_attachment=True)
 
 
 @app.post("/api/query-set")
@@ -1090,7 +1220,7 @@ def api_query_library():
     if not library_images():
         raise RequestError("The face library has no images; add some images first and try again")
 
-    labels, embedding_matrix = load_library()
+    labels, embedding_matrix, image_paths = _load_library_full()
     if embedding_matrix.shape[0] == 0:
         raise RequestError("No face detected in the face library; add images that contain faces first and try again")
 
@@ -1108,6 +1238,7 @@ def api_query_library():
                 embedding_matrix,
                 "Library candidate",
                 top_results_from_request(),
+                image_paths,
             ),
             "elapsed_ms": int((time.perf_counter() - started) * 1000),
         }

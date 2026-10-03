@@ -346,6 +346,16 @@ A few conclusions and suggestions:
 
 > ⚠️ These numbers vary with hardware, image size and image content; run your own benchmark in the target environment before deploying. The individual InsightFace stages were not measured separately, one by one.
 
+### 🧮 About FAISS retrieval acceleration
+
+This project **does not use FAISS**. Library search goes through an exact NumPy matrix multiplication (cosine similarity of `library faces × query faces`). That is a deliberate choice:
+
+- FAISS's `IndexFlatIP` is an **exact** index. It returns exactly what the current matrix multiplication returns, only as a different implementation, so it is not faster; in the measurements above, scoring 500 candidates takes about 0.5 ms and was never the bottleneck.
+- The real bottleneck is **face detection** (see the tables above), and FAISS takes no part in detection.
+- Adding FAISS would bring roughly 456 lines of dependency plus index lifecycle management (insert, delete, sync, persistence) for close to zero gain.
+
+It becomes worth considering only once the library passes **10,000 faces** and retrieval latency is genuinely the thing blocking you. At that point, reduce the detection cost first, then measure whether retrieval really is the bottleneck before switching to an approximate index (`IVF` / `HNSW`).
+
 ---
 
 ## 🔌 HTTP API
@@ -356,8 +366,40 @@ The routes and response structure are identical in both versions. Every endpoint
 | --- | --- | --- |
 | GET | `/` | Returns the web page |
 | GET | `/api/library` | Size statistics of the face library, **returning counts only, never the folder path** |
+| GET | `/api/health` | Readiness probe: counts images only, **encodes nothing**, safe to poll often |
+| GET | `/api/stats` | Runtime configuration: descriptor size, threshold metric, library size, dependency versions, missing models |
 | POST | `/api/query-set` | Compares the query image with the candidate images uploaded in the same request (1:N) |
 | POST | `/api/query-library` | Compares the query image with the whole face library (1:N) |
+| GET | `/library-image/<relative path>` | Fetches one image of the face library, for the result table thumbnails |
+| GET | `/library-image-download/<relative path>` | The same image as a download (`Content-Disposition: attachment`) |
+
+> 📌 The image routes accept a relative path **from inside the face library only**. `send_from_directory` resolves it and rejects anything that tries to climb out (`../../` and the like) with 403 or 404. The absolute library path never appears in any response.
+
+### 🩺 `/api/health`
+
+Counts the images in the library folder without loading a model or encoding anything, so it costs almost nothing and suits liveness and readiness probes. `ready` is `true` once the folder holds at least one image; whether those images actually contain faces is what a real search finds out.
+
+```json
+{ "ok": true, "ready": true, "images": 128, "detector": "cnn", "descriptor_dimension": 128 }
+```
+
+`detector` and `descriptor_dimension` are **returned by the dlib version only**.
+
+### 📊 `/api/stats`
+
+Reports the configuration **actually in force** on this machine, which is what you want when two machines answer differently and you need to know why. The fields differ slightly between versions; the common ones are:
+
+| Field | Meaning |
+| --- | --- |
+| `descriptor_dimension` | Descriptor size: `128` for the dlib version, `512` for the InsightFace version |
+| `threshold_metric` | Threshold metric, always `cosine_similarity` |
+| `sort_order` | Sort direction, always `cosine_similarity_descending` (higher means more similar) |
+| `library_images` / `library_faces` | Images in the library / faces detected in them |
+| `max_upload_mb` | Maximum request body size (MB) |
+| `missing_models` | Model files that are missing; empty means the models are all there |
+| `opencv_version` / `numpy_version` | Dependency versions |
+| `detector` / `dlib_cuda` / `configuration` | **dlib version only** |
+| `onnxruntime_version` / `onnxruntime_providers` / `model_directory_present` / `model_summary` | **InsightFace version only** |
 
 ### 🔧 Common Parameters
 
@@ -404,11 +446,14 @@ The routes and response structure are identical in both versions. Every endpoint
 
 The values of the `kind` field: `query-set` gives "Uploaded candidate", `query-library` gives "Library candidate".
 
+> 🖼️ Every row of `matches` may also carry an `image_url`: the address of that row's photo under `/library-image/`, which the page uses to draw the thumbnail. **Only rows of a library search (`query-library`) have one.** Uploaded candidates have no file to point at, so the field is absent there.
+
 ### ❌ Common Errors
 
 | Status code | Situation |
 | --- | --- |
 | 400 | No query image chosen, more than one query image, no candidate images chosen, no usable face among the candidates, the face library is empty, no face found in the library |
+| 403 / 404 | An image route was asked for a path outside the face library |
 | 413 | The request body exceeds 64 MB |
 | 500 | The dlib version is missing the CNN detector weights but is still asked to handle a request in CNN mode |
 
@@ -419,7 +464,7 @@ The values of the `kind` field: `query-set` gives "Uploaded candidate", `query-l
 - ⚠️ **This project does not produce an identity verdict.** It only outputs similarity numbers; choosing the "same person or not" threshold, and the misjudgments that follow from it, are the user's responsibility.
 - 🌐 **The service listens on `0.0.0.0` by default**, so any other host on the same LAN can reach it. To restrict it to this machine, change `host` to `127.0.0.1` in the `app.run(...)` call at the end of the file. ⚠️ Note: the address printed in the terminal is always `http://127.0.0.1:<port>`, even when every network interface is actually being listened on — do not use it to judge the exposure.
 - 🧠 **Uploaded images never touch the disk**: they are decoded and computed in memory only and released when the process exits. Face library images, on the other hand, are read and cached in process memory.
-- 🕵️ **The face library path never leaks**: neither the page nor the API displays or accepts it; the path exists only inside the server process (`/api/library` returns counts only).
+- 🕵️ **The face library path never leaks**: neither the page nor the API displays or accepts it; the path exists only inside the server process (`/api/library` returns counts only). Result table thumbnails are served from `/library-image/<relative path>`, which exposes nothing but an in-library relative path, and `send_from_directory` rejects any path that climbs out of the library.
 - 🕳️ **There is no authentication**: the program ships without identity verification or access control. If you deploy it on an untrusted network, be sure to add authentication in a reverse proxy layer.
 - 🐌 **Do not use a network share as the face library**: heavy small file network I/O noticeably degrades performance.
 - ⚠️ **The built-in server is the Flask development server**, suitable only for small scale use inside a private network; in production put it behind a WSGI server such as Gunicorn or uWSGI.

@@ -56,11 +56,18 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional, Sequence, Union
+from urllib.parse import quote
 
 import cv2
 import dlib
 import numpy as np
-from flask import Flask, jsonify, render_template_string, request
+from flask import (
+    Flask,
+    jsonify,
+    render_template_string,
+    request,
+    send_from_directory,
+)
 
 # =============================================================================
 # Configuration
@@ -103,6 +110,14 @@ MIN_TOP_RESULTS = 1
 MAX_TOP_RESULTS = 100
 DEFAULT_PORT = 5000
 PORT_SEARCH_ATTEMPTS = 20
+
+# --- library image routes ---
+# The result table shows a thumbnail of every matched photo, which means the
+# browser has to be able to fetch those files back. Only the route is exposed,
+# never the folder: a relative path from inside the library is all a request
+# can name.
+LIBRARY_IMAGE_ROUTE = "/library-image"
+LIBRARY_IMAGE_DOWNLOAD_ROUTE = "/library-image-download"
 
 # --- form field names, shared by the page and the endpoints ---
 QUERY_FIELD = "query"
@@ -561,11 +576,15 @@ def _forget_deleted_files(mode: str, alive_keys: set) -> None:
             del _DESCRIPTOR_CACHE[key]
 
 
-def load_library(directory: Path, detector: str = DETECTOR_CNN) -> tuple:
-    """Return (labels, matrix) for every face in the library folder.
+def _load_library_full(
+    directory: Path, detector: str = DETECTOR_CNN
+) -> tuple:
+    """Return (labels, matrix, relative paths) for every face in the folder.
 
-    Labels are file names, with " #2", " #3" appended when one photo holds
-    several faces. The matrix is one 128-d row per label, in the same order.
+    The relative paths are the folder-internal location of the photo each label
+    came from, one per label, in the same order. They exist so a result row can
+    point at the picture it names without the absolute folder ever being sent
+    to the browser.
     """
     mode = normalize_detector(detector)
     paths = library_images(directory)
@@ -573,6 +592,7 @@ def load_library(directory: Path, detector: str = DETECTOR_CNN) -> tuple:
 
     labels: list = []
     rows: list = []
+    relative_paths: list = []
     alive_keys: set = set()
 
     # One search at a time: the CNN detector is single threaded inside dlib
@@ -583,17 +603,39 @@ def load_library(directory: Path, detector: str = DETECTOR_CNN) -> tuple:
                 print(f"  载入人脸库 {index}/{len(paths)}  {path.name}", flush=True)
 
             alive_keys.add((str(path), mode))
+            relative_path = path.relative_to(directory).as_posix()
             for position, descriptor in enumerate(_descriptors_of(path, mode)):
                 labels.append(
                     path.name if position == 0 else f"{path.name} #{position + 1}"
                 )
                 rows.append(descriptor)
+                relative_paths.append(relative_path)
 
         _forget_deleted_files(mode, alive_keys)
 
     if not rows:
-        return labels, np.zeros((0, DESCRIPTOR_DIMENSION), dtype="float32")
-    return labels, np.vstack(rows).astype("float32")
+        return labels, np.zeros((0, DESCRIPTOR_DIMENSION), dtype="float32"), relative_paths
+    return labels, np.vstack(rows).astype("float32"), relative_paths
+
+
+def load_library(directory: Path, detector: str = DETECTOR_CNN) -> tuple:
+    """Return (labels, matrix) for every face in the library folder.
+
+    Labels are file names, with " #2", " #3" appended when one photo holds
+    several faces. The matrix is one 128-d row per label, in the same order.
+    """
+    labels, matrix, _relative_paths = _load_library_full(directory, detector)
+    return labels, matrix
+
+
+def library_image_url(relative_path: str) -> str:
+    """The browser-visible URL of one library photo.
+
+    The path is quoted because a photo may sit in a subfolder whose name holds
+    a space or a Chinese character, both of which are legal in a folder name
+    and legal in a URL once quoted.
+    """
+    return f"{LIBRARY_IMAGE_ROUTE}/{quote(relative_path)}"
 
 
 # =============================================================================
@@ -602,24 +644,37 @@ def load_library(directory: Path, detector: str = DETECTOR_CNN) -> tuple:
 
 
 def rank_scores(
-    labels: list, scores: np.ndarray, top_results: int, kind: str
+    labels: list,
+    scores: np.ndarray,
+    top_results: int,
+    kind: str,
+    image_paths: Optional[Sequence] = None,
 ) -> list:
     """Turn raw scores into a ranked, rounded list, best first.
 
     The bar drawn next to each row on the page is the similarity itself on a
     fixed 0-100 scale, so a bar is always as long as the number printed next
     to it.
+
+    image_paths, when given, is the library photo each label came from, in the
+    same order; every row then also carries the URL of its thumbnail. Rows
+    without one (uploaded candidates, for instance) simply have no image_url,
+    and the page shows no thumbnail for them.
     """
     order = np.argsort(-scores)[: max(1, int(top_results))]
-    return [
-        {
+    rows = []
+    for rank, index in enumerate(order, start=1):
+        index = int(index)
+        row = {
             "rank": rank,
             "kind": kind,
-            "candidate": labels[int(index)],
-            "similarity": round(float(scores[int(index)]), 2),
+            "candidate": labels[index],
+            "similarity": round(float(scores[index]), 2),
         }
-        for rank, index in enumerate(order, start=1)
-    ]
+        if image_paths is not None:
+            row["image_url"] = library_image_url(image_paths[index])
+        rows.append(row)
+    return rows
 
 
 def disambiguate(names: list) -> list:
@@ -729,7 +784,12 @@ def query_from_request(detector: str) -> tuple:
 
 
 def rank_matches(
-    query_descriptors: list, labels: list, candidates, kind: str, top_results: int
+    query_descriptors: list,
+    labels: list,
+    candidates,
+    kind: str,
+    top_results: int,
+    image_paths: Optional[Sequence] = None,
 ) -> list:
     """Score every candidate against the query faces and rank the best ones.
 
@@ -742,6 +802,7 @@ def rank_matches(
         similarity_matrix_percent(query_descriptors, candidates),
         top_results,
         kind,
+        image_paths,
     )
     if matches:
         matches[0]["best"] = True
@@ -871,8 +932,13 @@ PAGE = """
     background: var(--brand); color: #fff;
     font-size: .95rem; font-weight: 700; min-width: 5.2rem;
   }
-  .bar { height: 6px; border-radius: 3px; background: #f1e2d6; overflow: hidden; }
-  .bar > span { display: block; height: 100%; background: var(--brand); }
+.bar { height: 6px; border-radius: 3px; background: #f1e2d6; overflow: hidden; }
+    .bar > span { display: block; height: 100%; background: var(--brand); }
+    .thumb {
+      width: 2.75rem; height: 2.75rem; object-fit: cover;
+      border-radius: .35rem; border: 1px solid #f1e2d6; background: #faf5f1;
+      display: block;
+    }
   .alert-brand { background: var(--brand-tint); border: 1px solid #f3c9a8; color: #7a2e0a; }
   .empty-state { color: #a8968a; font-size: .92rem; }
   .thumb { max-height: 88px; border-radius: 6px; border: 1px solid #e6dbd1; }
@@ -1019,9 +1085,15 @@ function resultTable(rows) {
   // always matches the percentage printed next to it.
   const body = rows.map((row) => {
     const span = Math.max(0, Math.min(100, row.similarity));
+    // Rows without an image_url are uploaded candidates rather than library
+    // photos, and there is no picture to show for those.
+    const thumb = row.image_url
+      ? `<img class="thumb" src="${encodeURI(row.image_url)}" alt="" loading="lazy">`
+      : "";
     return `
     <tr${row.best ? ' class="table-warning"' : ''}>
       <td style="width:4rem">${row.rank}</td>
+      <td style="width:3.5rem">${thumb}</td>
       <td>${escapeHtml(row.candidate)}</td>
       <td style="width:9rem">
         <span class="badge badge-score">${row.similarity.toFixed(2)}%</span>
@@ -1032,7 +1104,7 @@ function resultTable(rows) {
     </tr>`;
   }).join("");
   return `<table class="table table-sm align-middle mb-0">
-    <thead><tr><th>排名</th><th>${escapeHtml(rows[0].kind || "候选")}</th><th>相似度</th><th></th></tr></thead>
+    <thead><tr><th>排名</th><th></th><th>${escapeHtml(rows[0].kind || "候选")}</th><th>相似度</th><th></th></tr></thead>
     <tbody>${body}</tbody></table>
     <p class="form-text mt-2 mb-0">横条长度就是相似度百分比，满条为 100%。</p>`;
 }
@@ -1191,13 +1263,102 @@ def api_library():
     Only the counts are returned; the folder itself never leaves the server.
     """
     directory = default_library_directory()
-    _labels, matrix = load_library(directory, detector_from_request())
+    _labels, matrix, _image_paths = _load_library_full(directory, detector_from_request())
     return jsonify(
         {
             "ok": True,
             "images": len(library_images(directory)),
             "faces": int(matrix.shape[0]),
         }
+    )
+
+
+@app.get("/api/health")
+def api_health():
+    """A readiness answer for scripts and process managers.
+
+    Cheap on purpose: it counts the library folder but does not encode
+    anything, so a probe can run every few seconds without costing a single
+    face detection. "ready" turns true once the folder holds at least one
+    image; whether those images actually contain faces is what a real search
+    finds out.
+    """
+    directory = default_library_directory()
+    images = library_images(directory)
+    return jsonify(
+        {
+            "ok": True,
+            "ready": bool(images),
+            "images": len(images),
+            "detector": default_detector(),
+            "descriptor_dimension": DESCRIPTOR_DIMENSION,
+        }
+    )
+
+
+@app.get("/api/stats")
+def api_stats():
+    """What the service is running with right now.
+
+    The settings that decide a score - detection mode, descriptor size,
+    threshold direction, model files - plus the size of the library. Useful
+    when two machines answer differently and you need to know why. The library
+    folder itself is reported only as a name, never as a path.
+    """
+    directory = default_library_directory()
+    detector = detector_from_request()
+    images = library_images(directory)
+    _labels, matrix, _image_paths = _load_library_full(directory, detector)
+
+    missing = []
+    for file_name in (LANDMARKS_FILE, LANDMARKS_FALLBACK_FILE, RECOGNITION_FILE):
+        try:
+            find_model_file(file_name)
+        except FileNotFoundError:
+            missing.append(file_name)
+    if detector == DETECTOR_CNN:
+        try:
+            find_model_file(CNN_DETECTOR_FILE)
+        except FileNotFoundError:
+            missing.append(CNN_DETECTOR_FILE)
+
+    return jsonify(
+        {
+            "ok": True,
+            "detector": detector,
+            "detector_available": list(DETECTOR_NAMES),
+            "descriptor_dimension": DESCRIPTOR_DIMENSION,
+            "library_images": len(images),
+            "library_faces": int(matrix.shape[0]),
+            "threshold_metric": "cosine_similarity",
+            "sort_order": "cosine_similarity_descending",
+            "max_upload_mb": MAX_UPLOAD_BYTES // (1024 * 1024),
+            "dlib_version": getattr(dlib, "__version__", "unknown"),
+            "opencv_version": getattr(cv2, "__version__", "unknown"),
+            "numpy_version": np.__version__,
+            "dlib_cuda": bool(getattr(dlib, "DLIB_USE_CUDA", False)),
+            "missing_models": missing,
+            "configuration": describe_configuration(),
+        }
+    )
+
+
+@app.get(LIBRARY_IMAGE_ROUTE + "/<path:relative_path>")
+def library_image(relative_path: str):
+    """One photo of the face library, for the thumbnail in the result table.
+
+    send_from_directory resolves the path inside the library folder and
+    refuses anything that climbs out of it, so a request cannot reach a file
+    elsewhere on the machine however the path is spelled.
+    """
+    return send_from_directory(default_library_directory(), relative_path)
+
+
+@app.get(LIBRARY_IMAGE_DOWNLOAD_ROUTE + "/<path:relative_path>")
+def library_image_download(relative_path: str):
+    """The same photo as a download, so a row can be saved or opened."""
+    return send_from_directory(
+        default_library_directory(), relative_path, as_attachment=True
     )
 
 
@@ -1262,7 +1423,7 @@ def api_query_library():
     if not images:
         raise RequestError("人脸库里没有图片，请先放入图片后重试")
 
-    labels, matrix = load_library(directory, detector)
+    labels, matrix, image_paths = _load_library_full(directory, detector)
     if matrix.shape[0] == 0:
         raise RequestError("人脸库里没有检测到人脸，请先放入带人脸的图片后重试")
 
@@ -1281,6 +1442,7 @@ def api_query_library():
                 matrix,
                 "库中候选",
                 top_results_from_request(),
+                image_paths,
             ),
             "elapsed_ms": int((time.perf_counter() - started) * 1000),
         }
