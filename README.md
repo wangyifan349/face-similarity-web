@@ -9,6 +9,8 @@
 
 > 🎯 One interface and one set of endpoints, two interchangeable recognition engines. This document covers both files: **`flask_face_match_v2.py`** (dlib version) and **`flask_insightface_face_v3.py`** (InsightFace version).
 
+🌐 **Languages:** English (this file) · [Chinese README](zh/README.md)
+
 ---
 
 ## 📖 Introduction

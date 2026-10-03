@@ -9,6 +9,8 @@
 
 > 🎯 同一套界面与接口，两种可替换的识别引擎。文档对应两个文件：**`flask_face_match_v2.py`**（dlib 版）与 **`flask_insightface_face_v3.py`**（InsightFace 版）。
 
+🌐 **语言：** 中文（本文件）· [English README](../README.md)
+
 ---
 
 ## 📖 简介
