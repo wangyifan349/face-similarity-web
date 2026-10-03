@@ -3,7 +3,8 @@ __pycache__/
 .venv/
 venv/
 
-# 模型权重体积大，按 README《模型文件（权重下载）》自行下载放置
+# Model weights are large; download and place them yourself as described in
+# the README section "Model Files (Weight Downloads)"
 *.dat
 *.onnx
 *.bz2

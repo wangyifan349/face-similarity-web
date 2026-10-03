@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 模型权重体积大，按 README《模型文件（权重下载）》自行下载放置
+*.dat
+*.onnx
+*.bz2

@@ -1,492 +1,492 @@
-# 🧑‍💻 人脸相似度网页版
+# 🧑‍💻 Face Similarity Web
 
 [![License](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](https://www.gnu.org/licenses/agpl-3.0.html)
 ![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)
 ![dlib](https://img.shields.io/badge/dlib-20.0.1-blue.svg)
 ![InsightFace](https://img.shields.io/badge/InsightFace-2.0-blue.svg)
-![单文件](https://img.shields.io/badge/architecture-single--file-lightgrey.svg)
+![Single file](https://img.shields.io/badge/architecture-single--file-lightgrey.svg)
 ![Flask](https://img.shields.io/badge/Flask-3.1.3-black.svg)
 
-> 🎯 同一套界面与接口，两种可替换的识别引擎。文档对应两个文件：**`flask_face_match_v2.py`**（dlib 版）与 **`flask_insightface_face_v3.py`**（InsightFace 版）。
+> 🎯 One interface and one set of endpoints, two interchangeable recognition engines. This document covers both files: **`flask_face_match_v2.py`** (dlib version) and **`flask_insightface_face_v3.py`** (InsightFace version).
 
 ---
 
-## 📖 简介
+## 📖 Introduction
 
-本程序解决的是这样一类问题：**给定一张查询图，找出它最像谁。** 它先检测图片中的人脸位置，对每张脸提取固定长度的特征向量，再把两个特征向量的余弦相似度换算成 0–100 的百分比，最后按相似度排序返回候选列表。百分比越高代表两张照片里的人脸特征越接近。程序本身从不给出「是否同一人」的结论，具体判定阈值需要使用者结合自身样本另行标定。
+This program answers a question of one kind: **given a query image, find out who it looks like.** It first detects the faces in the image, extracts a fixed length feature vector for each face, converts the cosine similarity of two feature vectors into a percentage from 0 to 100, then sorts the candidates by similarity and returns a ranked list. A higher percentage means the facial features in the two photos are closer together. The program itself never concludes whether two faces are "the same person"; the actual threshold has to be calibrated by the user against their own samples.
 
-程序提供两种检索方式，且可以互相独立使用：
+The program offers two retrieval modes, and each can be used entirely on its own:
 
-- 📤 **上传比对** —— 把一张查询图与本次一并上传的若干候选图逐一比较，完全不需要建立人脸库，适合临时核对。
-- 🗂️ **人脸库检索** —— 把一张查询图与服务端人脸库中的全部图片比较，自动返回最相似的若干项，适合在固定人员集合中查找。
+- 📤 **Upload comparison** — compare one query image against the candidate images uploaded in the same request. No face library is needed at all, which makes it suitable for ad hoc checks.
+- 🗂️ **Library search** — compare one query image against every image in the server side face library and return the closest matches automatically, which suits looking someone up in a fixed set of people.
 
-两者在页面左右两栏并排呈现，视觉布局与交互完全一致。
+The two sit side by side as the left and right columns of the page, with an identical visual layout and identical interactions.
 
-本仓库提供两个引擎实现，除[两个版本的区别](#-两个版本的区别)所列差异外，其余功能、接口与页面行为完全相同，且各自都是单文件，检测、特征、评分与 Web 服务逻辑全部内置，不依赖第二个模块。
+This repository provides two engine implementations. Apart from the differences listed in [Differences Between the Two Versions](#-differences-between-the-two-versions), everything else — features, endpoints and page behavior — is identical, and each one is a single file: detection, descriptors, scoring and the web service are all built in, with no second module to depend on.
 
 ---
 
-## 🔀 两个版本的区别
+## 🔀 Differences Between the Two Versions
 
-| 对比项 | dlib 版 | InsightFace 版 |
+| Item | dlib version | InsightFace version |
 | --- | --- | --- |
-| 📄 文件 | `flask_face_match_v2.py` | `flask_insightface_face_v3.py` |
-| ⚙️ 启动配置 | 命令行参数 | **无参数**，启动时交互询问人脸库目录（传入的参数会被静默忽略） |
-| 👁️ 人脸检测 | `mmod_human_face_detector.dat`（CNN）或 dlib 内置 HOG，页面可切换 | SCRFD（`det_10g.onnx`），**单一检测器** |
-| 🧬 特征提取 | dlib ResNet，128 维 | ArcFace，512 维 |
-| 📍 关键点模型 | 需要（68 点，缺失时降级为 5 点） | 不需要 |
-| 📥 权重获取 | 手动下载 `.bz2` 并解压 | 首次运行由 `insightface` 自动下载 |
-| 📏 分数刻度 | 同一人物多在 85 以上 | 同一人物多在 75 以上，不同人接近 0 |
-| 🎛️ 页面检测方式下拉框 | 有 | 无 |
-| ⚡ 硬件加速 | CPU（本机验证环境） | 启动时自动探测 CUDA，可用则用 GPU，否则回退 CPU |
+| 📄 File | `flask_face_match_v2.py` | `flask_insightface_face_v3.py` |
+| ⚙️ Startup configuration | Command line arguments | **No arguments**; the face library folder is asked for interactively at startup (any argument passed in is **silently ignored**) |
+| 👁️ Face detection | `mmod_human_face_detector.dat` (CNN) or dlib's built-in HOG, switchable on the page | SCRFD (`det_10g.onnx`), a **single detector** |
+| 🧬 Feature extraction | dlib ResNet, 128 dimensions | ArcFace, 512 dimensions |
+| 📍 Landmarks model | Required (68 points, falls back to 5 points when missing) | Not required |
+| 📥 Getting the weights | Download the `.bz2` files manually and unpack them | Downloaded automatically by `insightface` on first run |
+| 📏 Score scale | The same person is usually above 85 | The same person is usually above 75; different people are near 0 |
+| 🎛️ Detection mode dropdown on the page | Yes | No |
+| ⚡ Hardware acceleration | CPU (the machine this was verified on) | CUDA is probed at startup; the GPU is used when available, otherwise it falls back to the CPU |
 
-> ⚠️ **两个版本的分数不可横向比较。** 它们来自完全不同的特征模型，刻度只是各自内部自洽。详见[分数口径](#-分数口径)。
+> ⚠️ **Scores from the two versions cannot be compared side by side.** They come from completely different feature models, and each scale is only self consistent within its own engine. See [Score Semantics](#-score-semantics).
 
 ---
 
-## ✨ 功能特性
+## ✨ Features
 
-| 特性 | 说明 |
+| Feature | Description |
 | --- | --- |
-| 📦 **单文件部署** | 两个引擎各自压缩为一个 `.py` 文件，无第二个模块 |
-| 🔀 **两种检索方式** | 上传比对与人脸库检索并列，互不依赖 |
-| 🎛️ **双检测模式** | dlib 版可在「准确（CNN）」与「快速（HOG）」间切换，评分口径一致 |
-| 🧠 **模型常驻** | 模型进程内仅加载一次，切换模式无需重启服务 |
-| ⚡ **库缓存** | 人脸库按文件缓存特征，以修改时间判定失效，增删改即时生效 |
-| 🛡️ **容错设计** | 单张图片损坏或无人脸时跳过并记录，不中断整体检索 |
-| 📊 **绝对刻度可视化** | 相似度横条按固定刻度绘制；⚠️ 负分显示为 0% 空条，但数值仍显示带符号的真实分数 |
-| 🔒 **无环境变量** | 两个版本都不读取任何环境变量，配置来源明确 |
-| 🕵️ **路径不外泄** | 人脸库目录仅存在于服务端，页面与接口均不暴露、不接受该参数 |
+| 📦 **Single file deployment** | Each engine is compressed into one `.py` file, with no second module |
+| 🔀 **Two retrieval modes** | Upload comparison and library search sit side by side and do not depend on each other |
+| 🎛️ **Two detection modes** | The dlib version switches between "Accurate (CNN)" and "Fast (HOG)" with an identical scoring basis |
+| 🧠 **Models stay resident** | Each model is loaded only once per process; switching modes needs no restart |
+| ⚡ **Library cache** | Descriptors are cached per file and invalidated by modification time, so additions, edits and deletions take effect immediately |
+| 🛡️ **Fault tolerance** | A single corrupt image, or one with no face, is skipped and logged without aborting the whole search |
+| 📊 **Absolute scale visualization** | Similarity bars are drawn on a fixed scale; ⚠️ a negative score shows as an empty 0% bar while the number still displays the real signed score |
+| 🔒 **No environment variables** | Neither version reads any environment variable, so the source of every setting is obvious |
+| 🕵️ **The path never leaks** | The face library folder exists only on the server; neither the page nor the API exposes or accepts it |
 
 ---
 
-## 🖥️ 界面结构
+## 🖥️ Interface Layout
 
 ```
-┌──────────────────────────────────────────────────────────────────────┐
-│ 人脸相似度                          检测方式 [准确(CNN) ▾]   人脸库状态 │
-├────────────────────────────────┬─────────────────────────────────────┤
-│ ① 查询图 vs 候选图片（1:N）      │ ② 查询图 vs 人脸库（1:N）            │
-│                                │                                     │
-│ ① 查询图片（单张）               │ ① 查询图片（单张）                   │
-│ ② 候选图片（可多选）             │ 返回条数                            │
-│ 返回条数                        │                                     │
-│ [ 开始比对 ]                   │ [ 搜索人脸库 ]                      │
-├────────────────────────────────┴─────────────────────────────────────┤
-│ ③ 结果                                                                 │
-│ ┌────────┬────────────────┬──────────────┬────────────────────────┐ │
-│ │ 排名    │ 候选图片        │ 相似度        │                        │ │
-│ ├────────┼────────────────┼──────────────┼────────────────────────┤ │
-│ │ 1      │ zhang.jpg      │ 91.23%       │ ████████████████████░░░ │ │
-│ │ 2      │ li.jpg         │ 78.90%       │ ███████████████░░░░░░░░░ │ │
-│ └────────┴────────────────┴──────────────┴────────────────────────┘ │
-│ 横条长度为 100% 满格；负分不显示条形。                               │
-└──────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ Face Similarity             Detection mode [Accurate(CNN) ▾]   Library status│
+├────────────────────────────────┬─────────────────────────────────────────────┤
+│ 1 Query vs candidates (1:N)    │ 2 Query vs library (1:N)                    │
+│                                │                                             │
+│ (1) Query image (single)       │ (1) Query image (single)                    │
+│ (2) Candidate images (multi)   │ Results to return                           │
+│ Results to return              │                                             │
+│ [ Start comparison ]           │ [ Search library ]                          │
+├────────────────────────────────┴─────────────────────────────────────────────┤
+│ 3 Results                                                                    │
+│+--------+----------------+--------------+------------------------------+     │
+│| Rank   | Candidate      | Similarity   |                              |     │
+│+--------+----------------+--------------+------------------------------+     │
+│| 1      | zhang.jpg      | 91.23%       | ████████████████████░░░      |     │
+│| 2      | li.jpg         | 78.90%       | ██████████████░░░░░░░░       |     │
+│+--------+----------------+--------------+------------------------------+     │
+│ A full bar is 100%; a negative score shows no bar at all.                    │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-界面要点：左右两栏等宽并排、紧贴页面两侧；选择文件后即时显示缩略图预览；请求进行中按钮进入加载状态；最相似项以独立摘要块突出显示；错误信息以可关闭提示条呈现。
+Interface highlights: the two columns are equally wide, side by side and hugging the edges of the page; a thumbnail preview appears as soon as files are chosen; the button enters a loading state while a request is in flight; the closest match is highlighted in a separate summary block; errors are shown as a dismissible alert bar.
 
-💡 InsightFace 版与此布局一致，仅顶部不显示「检测方式」下拉框（该引擎只有一个检测器），其余元素位置不变。结果表的第三列表头取自本次数据的 `kind` 字段（「候选图片」或「库中候选」）。
+💡 The InsightFace version uses the same layout, except that no "Detection mode" dropdown appears at the top (that engine has only one detector); every other element stays in place. The third column header of the result table comes from the `kind` field of the data at hand ("Uploaded candidate" or "Library candidate").
 
 ---
 
-## ⚙️ 运行环境
+## ⚙️ Requirements
 
-两个版本共用 Flask、OpenCV、NumPy，识别引擎依赖不同：
+Both versions share Flask, OpenCV and NumPy; the recognition engines differ in their dependencies:
 
-| 项目 | 最低要求 | 本机验证版本 |
+| Item | Minimum | Version verified on this machine |
 | --- | --- | --- |
 | Python | 3.9 | 3.14.3 |
 | Flask | 3.0 | 3.1.3 |
 | opencv-python | 4.5 | 5.0.0.93 |
 | numpy | 1.23 | 2.4.6 |
 
-| 引擎 | 额外依赖 | 本机验证版本 |
+| Engine | Extra dependencies | Version verified on this machine |
 | --- | --- | --- |
-| dlib 版 | `dlib` | 20.0.1 |
-| InsightFace 版 | `insightface`、`onnxruntime` | 2.0 / 1.30.0 |
+| dlib version | `dlib` | 20.0.1 |
+| InsightFace version | `insightface`, `onnxruntime` | 2.0 / 1.30.0 |
 
-支持 Windows、Linux、macOS。除 dlib 外，其余依赖均可直接通过 pip 安装：
+Windows, Linux and macOS are all supported. Apart from dlib, every dependency can be installed straight from pip:
 
 ```bash
 pip install flask opencv-python numpy
-# 再按所选引擎追加其中之一：
-pip install dlib                  # dlib 版
-pip install insightface onnxruntime   # InsightFace 版
+# then add the one matching the engine you picked:
+pip install dlib                       # dlib version
+pip install insightface onnxruntime   # InsightFace version
 ```
 
-> 📝 上表的「本机验证版本」为实际安装并验证过的组合。代码本身未使用 3.9 以上专属语法，理论上下限由 `dlib` / `insightface` 的可用 wheel 决定。
+> 📝 The "version verified on this machine" column above lists combinations that were actually installed and verified. The code itself uses no syntax specific to anything above 3.9, so in theory the lower bound is decided by which wheels are available for `dlib` / `insightface`.
 
-### 🔨 关于 dlib 的安装
+### 🔨 About Installing dlib
 
-dlib 在部分平台与解释器组合下没有预编译包，需要本地具备 C++ 编译环境：
+On some platform and interpreter combinations dlib has no prebuilt package, so a local C++ toolchain is required:
 
-| 平台 | 所需依赖 |
+| Platform | What is needed |
 | --- | --- |
-| Windows | Visual Studio Build Tools 中的「使用 C++ 的桌面开发」工作负载 |
-| Linux | `build-essential`、`cmake` |
+| Windows | The "Desktop development with C++" workload of Visual Studio Build Tools |
+| Linux | `build-essential`, `cmake` |
 | macOS | Xcode Command Line Tools |
 
-若源码编译失败，可改用 conda 渠道的预编译包：`conda install -c conda-forge dlib`。
+If compiling from source fails, use the prebuilt package from the conda channel instead: `conda install -c conda-forge dlib`.
 
 ---
 
-## 🧠 模型文件（权重下载）
+## 🧠 Model Files (Weight Downloads)
 
-### dlib 版
+### dlib version
 
-依赖 dlib 官方的四个权重文件。**全部从 dlib 官方站点下载，无需注册、无需登录。**
+Four weight files from the official dlib site are needed. **All of them are downloaded from the official dlib site; no registration and no login.**
 
-| 文件 | 用途 | 是否必需 | 下载 | 压缩包大小 |
+| File | Purpose | Required | Download | Archive size |
 | --- | --- | --- | --- | --- |
-| `shape_predictor_68_face_landmarks.dat` | **68 点面部关键点预测**。检测出人脸框后由它定位特征点，作为特征提取的输入 | 必需（缺失时降级为 5 点） | [dlib.net/files](http://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2) | 约 61 MB |
-| `dlib_face_recognition_resnet_model_v1.dat` | **128 维人脸特征提取**。所有相似度分数都由它产生的特征向量计算得出 | 必需 | [dlib.net/files](http://dlib.net/files/dlib_face_recognition_resnet_model_v1.dat.bz2) | 约 20 MB |
-| `mmod_human_face_detector.dat` | **CNN 人脸检测器**（MMOD）。仅「准确（CNN）」模式需要，对侧脸、小尺度人脸与复杂背景的检出率明显优于 HOG | 可选 | [dlib.net/files](http://dlib.net/files/mmod_human_face_detector.dat.bz2) | 约 0.7 MB |
-| `shape_predictor_5_face_landmarks.dat` | **5 点关键点预测**，作为 68 点版本的降级替代。仅在 68 点文件缺失时自动启用，对齐精度下降 | 可选 | [dlib.net/files](http://dlib.net/files/shape_predictor_5_face_landmarks.dat.bz2) | 约 5.4 MB |
+| `shape_predictor_68_face_landmarks.dat` | **68 point facial landmark prediction**. Once a face box has been detected, this locates the feature points that feed into feature extraction | Required (falls back to 5 points when missing) | [dlib.net/files](http://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2) | about 61 MB |
+| `dlib_face_recognition_resnet_model_v1.dat` | **128 dimensional face feature extraction**. Every similarity score is computed from the feature vectors it produces | Required | [dlib.net/files](http://dlib.net/files/dlib_face_recognition_resnet_model_v1.dat.bz2) | about 20 MB |
+| `mmod_human_face_detector.dat` | **CNN face detector** (MMOD). Only the "Accurate (CNN)" mode needs it; its recall on profile faces, small faces and cluttered backgrounds is clearly better than HOG | Optional | [dlib.net/files](http://dlib.net/files/mmod_human_face_detector.dat.bz2) | about 0.7 MB |
+| `shape_predictor_5_face_landmarks.dat` | **5 point landmark prediction**, used as a fallback for the 68 point version. Enabled automatically only when the 68 point file is missing, with lower alignment accuracy | Optional | [dlib.net/files](http://dlib.net/files/shape_predictor_5_face_landmarks.dat.bz2) | about 5.4 MB |
 
-📌 前两项任缺其一程序都无法工作（启动阶段直接抛出异常）。
+📌 The program cannot work if either of the first two is missing (it raises an exception right at startup).
 
-> ⚠️ `mmod_human_face_detector.dat` 缺失**不会**被优雅降级：默认模式为 CNN，模型加载会抛出未捕获的 `FileNotFoundError`，网页服务在预热阶段即退出；若服务已在运行，切到 CNN 模式的请求会返回 **HTTP 500**。若不需要 CNN 模式，请用 `--hog` 启动。
+> ⚠️ A missing `mmod_human_face_detector.dat` is **not** degraded gracefully: the default mode is CNN, so loading the model raises an uncaught `FileNotFoundError` and the web service exits during warm up; if the service is already running, a request that switches to CNN mode returns **HTTP 500**. If you do not need CNN mode, start with `--hog`.
 
-### InsightFace 版
+### InsightFace version
 
-依赖 `buffalo_l` 模型包中的两个文件：`det_10g.onnx`（SCRFD 检测）与 `w600k_r50.onnx`（ArcFace 512 维特征）。
+Two files from the `buffalo_l` model pack are needed: `det_10g.onnx` (SCRFD detection) and `w600k_r50.onnx` (ArcFace 512 dimensional features).
 
-**无需手动下载**：首次运行时 `insightface` 会自动下载整个 `buffalo_l` 模型包到用户目录下的 `.insightface/models/buffalo_l`。
+**No manual download is needed**: on first run `insightface` downloads the whole `buffalo_l` pack into `.insightface/models/buffalo_l` under the user directory.
 
-程序按以下顺序查找模型目录，**要求该目录下两个文件都存在**才算命中：
+The program looks for the model directory in this order; a location **only counts as a hit when both files are present in it**:
 
-1. 脚本同级 `insightface_models/buffalo_l/`
-2. 脚本同级 `models/buffalo_l/`
-3. 脚本同级 `buffalo_l/`
-4. `~/.insightface/models/buffalo_l/`（自动下载的默认位置）
+1. `insightface_models/buffalo_l/` next to the script
+2. `models/buffalo_l/` next to the script
+3. `buffalo_l/` next to the script
+4. `~/.insightface/models/buffalo_l/` (the default download location)
 
-💡 前三项让模型可以随程序一起分发，完全离线运行。
+💡 The first three let the models be shipped together with the program, so it runs fully offline.
 
-📌 若某个目录存在但缺少其中一个文件，该目录会被**静默跳过**，继续尝试下一个；全部位置都不完整时，程序转为执行自动下载。**程序不会主动报出「缺少哪个文件」。**
+📌 If a directory exists but is missing one of the files, that directory is **silently skipped** and the next one is tried; when no location is complete, the program falls back to downloading automatically. **The program never says which file is missing.**
 
-若处于离线环境，可先在有网机器上运行一次以完成下载，再整体拷贝 `buffalo_l` 目录放到上述任一位置。
+If you are offline, run it once on a machine with network access to complete the download, then copy the whole `buffalo_l` directory to any of the locations above.
 
-### 📂 dlib 权重的放置位置与查找顺序
+### 📂 Where to Put the dlib Weights and the Lookup Order
 
-程序先收集全部候选路径，再选出其中第一个可用的文件：
+The program first collects every candidate path, then picks the first usable file:
 
-1. 脚本同级的 `models/` 目录
-2. 脚本所在目录
-3. 脚本所在目录下的任意子目录（递归查找）
-4. `sys.path` 中**每一个**目录下的该文件名，以及该目录的 `face_recognition_models/models/` 下的该文件名
+1. the `models/` directory next to the script
+2. the directory the script itself is in
+3. any subdirectory of the script's directory (searched recursively)
+4. that file name under **every** directory in `sys.path`, plus that file name under the `face_recognition_models/models/` subdirectory of each
 
-> 📝 第 4 步是**按 `sys.path` 顺序逐个目录交替尝试**的，即 `sys.path[0]/<文件>` → `sys.path[0]/face_recognition_models/models/<文件>` → `sys.path[1]/<文件>` → …，而非先扫完整个 `sys.path` 再找模型包。
+> 📝 Step 4 **alternates between directories in `sys.path` order**, that is `sys.path[0]/<file>` → `sys.path[0]/face_recognition_models/models/<file>` → `sys.path[1]/<file>` → …, rather than scanning the whole of `sys.path` first and only then looking inside the model pack.
 
-全部位置均未命中时，程序会在启动阶段直接抛出异常，并明确指出缺失的是哪个文件。
+When no location matches, the program raises an exception right at startup and states clearly which file is missing.
 
-🔍 **ASCII 路径优先**：候选结果中若存在纯 ASCII 路径，会被优先选中，即便它排在更靠前的非 ASCII 路径之后（因为 dlib 无法打开非 ASCII 路径）。全部候选均为非 ASCII 时，退回使用第一个。
+🔍 **ASCII paths win**: if the candidates include a pure ASCII path, that one is picked even when a non-ASCII path came earlier in the list (because dlib cannot open non-ASCII paths). When every candidate is non-ASCII, the first one is used.
 
-推荐的目录组织方式：
+A recommended directory layout:
 
-| 路径 | 用途 | 是否必需 |
+| Path | Purpose | Required |
 | --- | --- | --- |
-| `flask_face_match_v2.py` | dlib 版程序本体 | 必需 |
-| `models/` | 存放权重文件，必需的两项放这里 | 必需 |
-| `face_library/` | 人脸库目录，可用 `--dir` 指向其他位置 | 可选 |
+| `flask_face_match_v2.py` | The dlib version program itself | Required |
+| `models/` | Holds the weights; put the two required ones here | Required |
+| `face_library/` | The face library folder; point `--dir` somewhere else if you prefer | Optional |
 
-### 🛍 备选获取途径
+### 🛍 Alternative Sources
 
-若希望省去逐个下载 dlib 权重，可选择以下任一方式：
+If you would rather not download the dlib weights one by one, pick any of these:
 
-| 途径 | 说明 |
+| Route | Description |
 | --- | --- |
-| [face_recognition_models（PyPI）](https://pypi.org/project/face-recognition-models/) | pip 安装的模型包，**内含 68 点关键点与识别模型两个文件**，安装后程序会自动在包内 `models` 目录中找到。**不包含 CNN 检测器**，用「准确（CNN）」模式仍要单独下载 |
-| [face_recognition_models（GitHub 源仓库）](https://github.com/ageitgey/face_recognition_models) | 上述模型包的源码仓库，附有权重原始下载说明 |
-| [face_recognition（GitHub）](https://github.com/ageitgey/face_recognition) | 知名的 Python 人脸识别库，其说明中完整列出上述 dlib 权重的官方地址与获取步骤 |
-| [dlib 官方网站](http://dlib.net/) | dlib 官方站点，介绍整体能力与其他模型 |
+| [face_recognition_models (PyPI)](https://pypi.org/project/face-recognition-models/) | A pip installable model pack that **contains both the 68 point landmarks file and the recognition model**; after installing it the program finds them automatically in the pack's `models` directory. **It does not contain the CNN detector**, so "Accurate (CNN)" mode still needs a separate download |
+| [face_recognition_models (GitHub source)](https://github.com/ageitgey/face_recognition_models) | The source repository of that model pack, with the original weight download instructions |
+| [face_recognition (GitHub)](https://github.com/ageitgey/face_recognition) | The well known Python face recognition library; its documentation lists the official addresses and the steps for getting the dlib weights above |
+| [The dlib website](http://dlib.net/) | The official dlib site, describing its overall capabilities and the other models |
 
-### 🇨🇳 关于中文路径
+### 🇨🇳 About Non-ASCII Paths
 
-dlib 无法直接打开包含非 ASCII 字符的路径。dlib 版内置处理逻辑，会将此类权重文件自动镜像到系统临时目录（`%TEMP%\dlib_face_models\`）后再加载，使用者无需干预。InsightFace 版基于 ONNX Runtime，不存在此限制。
+dlib cannot open a path that contains non-ASCII characters directly. The dlib version has built in handling for this and mirrors such weight files into the system temp directory (`%TEMP%\dlib_face_models\`) before loading them, so no intervention is needed. The InsightFace version is built on ONNX Runtime and has no such limitation.
 
 ---
 
-## 🚀 启动方式
+## 🚀 Running the App
 
-### dlib 版
+### dlib version
 
-通过命令行参数配置，不读取任何环境变量。默认使用同级的 `face_library` 作为人脸库目录，从 5000 端口开始监听；若端口被占用，会自动向后顺延，最多尝试 20 个（即 5000–5019）。
+Configured through command line arguments, reading no environment variables at all. By default it uses `face_library` next to the script as the face library folder and starts listening on port 5000; if that port is taken it moves forward automatically, trying at most 20 of them (that is 5000–5019).
 
-| 参数 | 默认值 | 说明 |
+| Argument | Default | Description |
 | --- | --- | --- |
-| `--dir` | 脚本同级 `face_library` | 指定人脸库目录，递归扫描其全部子目录 |
-| `--port` | `5000` | 指定起始监听端口 |
-| `--hog` | 关闭 | 将页面默认检测模式设为「快速」；页面下拉框可随时切回 |
-| `--library-info` | 关闭 | 仅统计人脸库规模并输出后退出，不启动网页服务 |
+| `--dir` | `face_library` next to the script | Sets the face library folder; all of its subdirectories are scanned recursively |
+| `--port` | `5000` | Sets the first port to listen on |
+| `--hog` | Off | Makes "Fast" the default detection mode on the page; the dropdown can switch back at any time |
+| `--library-info` | Off | Only counts the size of the face library, prints it and exits, without starting the web service |
 
 ```bash
-python flask_face_match_v2.py --dir "D:\人脸库" --port 5000
-python flask_face_match_v2.py --library-info          # 先体检再上线
+python flask_face_match_v2.py --dir "D:\faces" --port 5000
+python flask_face_match_v2.py --library-info          # check it over before going live
 ```
 
-💡 `--library-info` 建议在首次部署时使用，可在正式对外服务之前确认模型加载正常、人脸库路径正确、图片与人脸数量符合预期。
+💡 `--library-info` is recommended for a first deployment: before serving anyone for real, it confirms that the models load correctly, that the face library path is right, and that the image and face counts are what you expected.
 
-### InsightFace 版
+### InsightFace version
 
-**不接受任何命令行参数**——脚本完全不读取 `sys.argv`，传入的参数会被**静默忽略**（不会报错，也不会提示），请勿据此以为参数已生效。人脸库目录在启动时以交互方式询问：
+**Accepts no command line arguments at all** — the script does not read `sys.argv` in any way, and any argument passed in is **silently ignored** (no error, no warning), so never assume an argument took effect. The face library folder is asked for interactively at startup:
 
-| 提示 | 说明 |
+| Prompt | Behavior |
 | --- | --- |
-| 首次启动询问 | 请输入人脸库目录；直接回车使用脚本同级的 `face_library` |
-| 输入的目录不存在 | 提示后重新询问 |
-| 输入了文件而非目录 | 提示后重新询问 |
-| 非交互终端 | 不询问，直接使用默认目录 |
-| 默认目录不存在 | 自动创建（`mkdir(parents=True, exist_ok=True)`） |
+| Asked on first startup | Type the face library folder; press Enter to use `face_library` next to the script |
+| The folder typed in does not exist | It says so and asks again |
+| A file was typed in instead of a folder | It says so and asks again |
+| Non interactive terminal | Nothing is asked; the default folder is used directly |
+| The default folder does not exist | It is created automatically (`mkdir(parents=True, exist_ok=True)`) |
 
-启动前会先完成模型加载与一次预热，随后打印可访问地址。首次启动还需下载 `buffalo_l` 模型包，耗时取决于网络。
-
----
-
-## 🔬 工作原理
-
-dlib 版处理流水线：
-
-> 🖼️ **输入图像** → 解码归一化为 RGB 数组 → 人脸检测 → 68 点关键点定位 → 提取 128 维特征 → L2 归一化 → 余弦相似度换算百分比 → 排序并裁剪为 Top-N
-
-InsightFace 版处理流水线：
-
-> 🖼️ **输入图像** → 解码归一化 → SCRFD 检测人脸（`det_size=640×640`，`det_thresh=0.5`）并输出 5 点关键点 → 裁剪并对齐 → ArcFace 提取 512 维特征 → L2 归一化 → 余弦相似度换算百分比 → 排序并裁剪为 Top-N
-
-关于评分的几点说明：
-
-- 📏 分数为**余弦相似度百分比**，即 `dot(a, b) × 100`；同一张图片自比为 100%。
-- 🔎 **查询图侧**不做取最大限制：每个候选都会与查询图中的**全部人脸**比对，取最高得分作为该候选的分数。因此查询图为多人合影时也能正常选出最像的那张脸。
-- 1️⃣ **候选图侧**只取**面积最大**的那张脸参与比对。
-- 📊 结果表中的横条在浏览器端被限制在 0–100 区间绘制，因此负分显示为 0% 空条，而数值标签仍显示带符号的真实分数。
-
-> 📝 两个文件都导出了 `face_similarity_percent()` 库函数，其签名中的多脸处理默认值**恰好相反**：dlib 版默认 `compare_all_faces=False`（取最大脸），InsightFace 版默认 `largest_only=False`（取最优配对）。该函数**没有被任何 HTTP 路由调用**，网页端行为以上述规则为准。
+The models are loaded and warmed up once before startup finishes, then the reachable address is printed. The first run also downloads the `buffalo_l` pack, which takes as long as the network allows.
 
 ---
 
-## 📏 分数口径
+## 🔬 How It Works
 
-两个引擎的特征模型不同，分数**只在各自内部可比**，跨引擎比较没有意义。
+The dlib version pipeline:
 
-| 样本 | dlib 版 | InsightFace 版 |
+> 🖼️ **Input image** → decode and normalize into an RGB array → face detection → 68 point landmark location → 128 dimensional feature extraction → L2 normalization → cosine similarity converted to a percentage → sort and cut to Top-N
+
+The InsightFace version pipeline:
+
+> 🖼️ **Input image** → decode and normalize → SCRFD face detection (`det_size=640×640`, `det_thresh=0.5`) returning 5 point landmarks → crop and align → ArcFace 512 dimensional feature extraction → L2 normalization → cosine similarity converted to a percentage → sort and cut to Top-N
+
+A few notes on scoring:
+
+- 📏 The score is a **cosine similarity percentage**, that is `dot(a, b) × 100`; an image compared with itself gives 100%.
+- 🔎 The **query image side** has no "take the maximum" limit: every candidate is compared against **all** faces in the query image, and the highest score becomes that candidate's score. So a group photo as the query still picks out the face that looks most like the candidate.
+- 1️⃣ The **candidate image side** only uses the **largest** face for the comparison.
+- 📊 The bars in the result table are clamped to the 0–100 range in the browser, so a negative score shows as an empty 0% bar while the numeric label still displays the real signed score.
+
+> 📝 Both files export a `face_similarity_percent()` library function whose multi-face default is **exactly the opposite** in the signature: the dlib version defaults to `compare_all_faces=False` (take the largest face), the InsightFace version to `largest_only=False` (take the best pairing). That function is **not called by any HTTP route**, and the web behavior follows the rules above.
+
+---
+
+## 📏 Score Semantics
+
+The two engines use different feature models, so scores are **only comparable within each engine**; comparing across engines is meaningless.
+
+| Sample | dlib version | InsightFace version |
 | --- | --- | --- |
-| 同一张图片自比 | 100.00% | 100.00% |
-| 同一人不同照片（正面裁剪图 vs 半身照） | 96.85% | 77.57% |
-| 不同人（多组样本） | 明显低于同人 | −3% ~ +1% |
+| The same image compared with itself | 100.00% | 100.00% |
+| Same person, different photos (frontal crop vs half body shot) | 96.85% | 77.57% |
+| Different people (several samples) | clearly below the same person | −3% to +1% |
 
-上表为本机单组样本实测，仅用于说明量级差异。InsightFace 的 ArcFace 特征在异人之间区分度更大，因此同人分数低于 dlib、异人分数接近零；这不代表哪一版更准，只代表两者的刻度不同。
+The table above comes from a single set of samples measured on one machine and serves only to illustrate the difference in magnitude. ArcFace features from InsightFace separate different people more sharply, which is why the same person scores lower than with dlib while different people score near zero; this does not mean either version is more accurate, only that the two scales differ.
 
-💡 建议做法：选定一个引擎后，用自己业务场景下的同人／异人样本各若干组标定阈值，不要直接套用上表数值，也不要把两个引擎的分数放在同一张榜单里排序。
+💡 Recommended practice: once you have picked an engine, calibrate the threshold with several same-person and different-person samples from your own scenario. Do not copy the numbers in the table above directly, and do not put scores from the two engines on the same leaderboard.
 
 ---
 
-## 🎛️ 检测模式（dlib 版）
+## 🎛️ Detection Modes (dlib version)
 
-| 对比项 | 准确（CNN） | 快速（HOG） |
+| Item | Accurate (CNN) | Fast (HOG) |
 | --- | --- | --- |
-| 👁️ 检测器 | `mmod_human_face_detector.dat` | dlib 内置，无需权重文件 |
-| 🔍 上采样次数 | 0 | 1 |
-| 🧩 适用场景 | 侧脸、小尺度人脸、复杂背景 | 正面、光照均匀 |
-| ⏱️ 相对开销 | 高 | 低 |
-| 📍 关键点模型 | 相同 | 相同 |
-| 🧬 特征模型 | 相同 | 相同 |
-| 📊 评分逻辑 | 相同 | 相同 |
+| 👁️ Detector | `mmod_human_face_detector.dat` | dlib's built-in one, no weights file needed |
+| 🔍 Upsampling passes | 0 | 1 |
+| 🧩 Best suited for | Profile faces, small faces, cluttered backgrounds | Frontal faces, even lighting |
+| ⏱️ Relative cost | High | Low |
+| 📍 Landmarks model | The same | The same |
+| 🧬 Feature model | The same | The same |
+| 📊 Scoring logic | The same | The same |
 
-上采样每提升一级，耗时约增至四倍，同时提升小尺度人脸的检出率；因此 CNN 模式取 0，HOG 模式取 1。两种模式**仅在人脸检测环节存在差异**，其后的关键点、特征与评分链路完全一致，因此两种模式产出的分数可以直接横向对比。两种模式各自缓存特征（缓存键包含检测模式），来回切换不会重复编码人脸库。
+Each extra level of upsampling multiplies the time by about four while also improving recall on small faces; hence CNN uses 0 and HOG uses 1. The two modes **differ only in the face detection step**; the landmark, feature and scoring chain after it is exactly the same, so the scores the two modes produce can be compared directly. Each mode caches its own descriptors (the cache key includes the detection mode), so switching back and forth never re-encodes the library.
 
-InsightFace 版只有 SCRFD 一种检测器，不提供此选项。
-
----
-
-## 🗂️ 人脸库约定
-
-- 📍 **位置**：dlib 版由 `--dir` 或默认目录决定；InsightFace 版由启动时回答或默认目录决定。两者均递归遍历全部子目录。
-- 🖼️ **格式**：支持 `.jpg` `.jpeg` `.png` `.bmp` `.webp`，扩展名不区分大小写。
-- 👥 **多脸文件（人脸库检索）**：单张图片中的**每张人脸**均生成独立候选，第二张起追加 `#2`、`#3` 后缀。
-- 📤 **多脸文件（上传比对）**：每张上传图片**只取面积最大的一张脸**，不追加后缀，也不会因为一张图里有多张脸而拆分候选。
-- 🏷️ **重名文件**：不同目录下的同名文件在**上传比对**结果中显示为「名称 (1)」「名称 (2)」以示区分；⚠️ 该去重**不作用于人脸库检索**——不同子目录下的 `zhang.jpg` 在库检索中都会显示为 `zhang.jpg`。
-- ⚡ **缓存策略**：缓存键为文件绝对路径，以文件修改时间判定有效性；图片修改、新增、删除均在下一次检索时自动反映，被删除文件的缓存条目同步清理。dlib 版额外把检测模式计入缓存键。
-- 🛡️ **容错**：单张图片读取失败或检测不到人脸时，该条目被跳过；上传比对会在 `skipped` 字段中列出原因，人脸库检索则静默跳过。
-- 📊 **进度输出**：人脸库图片总数达到 **20 张及以上**时，两个版本都会在终端逐张打印载入进度（缓存命中的图片同样打印）。
-- 🏠 **目录创建**：InsightFace 版在启动时会自动创建默认人脸库目录。dlib 版不会创建目录，需要自行准备。
+The InsightFace version has only the SCRFD detector and offers no such option.
 
 ---
 
-## ⏱️ 性能参考
+## 🗂️ Face Library Conventions
 
-以下为本机（AMD Ryzen 7 5800H / 60 GB 内存 / Windows / Python 3.14.3）的实测数据，仅供参考，**不构成性能承诺**。
+- 📍 **Location**: in the dlib version it is set by `--dir` or the default folder; in the InsightFace version by the answer given at startup or the default folder. Both walk all subdirectories recursively.
+- 🖼️ **Formats**: `.jpg` `.jpeg` `.png` `.bmp` `.webp` are supported, with the extension matched case insensitively.
+- 👥 **Files with several faces (library search)**: **every** face in one image becomes its own candidate, with `#2`, `#3` and so on appended from the second one on.
+- 📤 **Files with several faces (upload comparison)**: only the **largest** face of each uploaded image is used; no suffix is appended, and one image with several faces never splits into several candidates.
+- 🏷️ **Duplicate file names**: files of the same name in different folders are shown as "name (1)", "name (2)" in the **upload comparison** results; ⚠️ that de-duplication **does not apply to library search** — a `zhang.jpg` in two different subfolders shows as `zhang.jpg` in both places during a library search.
+- ⚡ **Cache policy**: the cache key is the absolute path of the file and validity is decided by its modification time; edits, additions and deletions of images are all reflected on the next search, and the cache entries of deleted files are cleaned up at the same time. The dlib version additionally counts the detection mode in the cache key.
+- 🛡️ **Fault tolerance**: when one image cannot be read or holds no face, that entry is skipped; upload comparison lists the reason in the `skipped` field, while library search skips it silently.
+- 📊 **Progress output**: once the face library holds **20 images or more**, both versions print per image load progress in the terminal (cache hits are printed too).
+- 🏠 **Folder creation**: the InsightFace version creates the default face library folder automatically at startup. The dlib version does not create folders; prepare one yourself.
 
-dlib 版，输入为 640×480 图像：
+---
 
-| 操作 | 耗时 |
+## ⏱️ Performance Reference
+
+The figures below were measured on this machine (AMD Ryzen 7 5800H / 60 GB RAM / Windows / Python 3.14.3). They are for reference only and **are not a performance guarantee**.
+
+dlib version, with 640×480 input:
+
+| Operation | Time |
 | --- | --- |
-| 模型加载（HOG 模式） | 约 1255 ms |
-| 模型加载（CNN 模式） | 约 1049 ms |
-| HOG 人脸检测（640×480） | 约 142 ms |
-| CNN 人脸检测（640×480） | 约 4625 ms |
-| 关键点 + 128 维特征提取（单张人脸） | 约 287 ms |
-| 500 个候选 × 1 个查询的相似度计算 | 约 0.5 ms |
+| Model loading (HOG mode) | about 1255 ms |
+| Model loading (CNN mode) | about 1049 ms |
+| HOG face detection (640×480) | about 142 ms |
+| CNN face detection (640×480) | about 4625 ms |
+| Landmarks + 128 dimensional feature extraction (one face) | about 287 ms |
+| Similarity computation for 500 candidates × 1 query | about 0.5 ms |
 
-InsightFace 版（本机启动时报告的执行提供程序为 CPUExecutionProvider）：
+InsightFace version (the execution provider reported at startup on this machine was CPUExecutionProvider):
 
-| 操作 | 耗时 |
+| Operation | Time |
 | --- | --- |
-| 模型加载 + 首次预热（含 ONNX 会话初始化） | 约 1.7 s |
-| 1 张查询 × 3 张库图端到端（1600×1600 大图，首次含编码） | 约 149 – 676 ms |
-| 同上，命中缓存后 | 毫秒级 |
+| Model loading + first warm up (including ONNX session setup) | about 1.7 s |
+| 1 query × 3 library images end to end (1600×1600 large images, first run includes encoding) | about 149 – 676 ms |
+| The same, after the cache is hit | single digit milliseconds |
 
-几点结论与建议：
+A few conclusions and suggestions:
 
-- 🎯 两个引擎的性能瓶颈都集中在**人脸检测**环节，特征提取与相似度计算的开销可以忽略。
-- ⚡ 首次检索大型人脸库耗时显著；此后请求命中缓存，通常为毫秒级。缓存位于进程内存，服务重启后失效。
-- 💡 dlib 版建议日常以 HOG 模式作为默认，需要时再切换至 CNN；CNN 检测耗时随图像分辨率快速上升，入库前统一将图片尺寸归一化收益明显。
-- 💡 InsightFace 版无需选择检测器；SCRFD 对输入分辨率较敏感，同样建议入库前归一化尺寸。
+- 🎯 In both engines the performance bottleneck sits in **face detection**; the cost of feature extraction and similarity computation is negligible.
+- ⚡ The first search of a large face library takes noticeably longer; later requests hit the cache and are usually single digit milliseconds. The cache lives in process memory and is lost on restart.
+- 💡 For the dlib version, use HOG mode as the daily default and switch to CNN when needed; CNN detection time rises quickly with image resolution, so normalizing image sizes before they enter the library pays off clearly.
+- 💡 The InsightFace version needs no detector choice; SCRFD is fairly sensitive to input resolution, so normalizing sizes before ingest is recommended here too.
 
-> ⚠️ 上述数值随硬件配置、图像尺寸与图片内容变化，部署前请在目标环境自行完成基准测试。InsightFace 各阶段的单独耗时未逐项拆分测量。
+> ⚠️ These numbers vary with hardware, image size and image content; run your own benchmark in the target environment before deploying. The individual InsightFace stages were not measured separately, one by one.
 
 ---
 
-## 🔌 HTTP 接口
+## 🔌 HTTP API
 
-两个版本的路由与响应结构完全一致。所有接口均为无状态调用。成功返回 HTTP 200；失败返回包含 `ok: false` 与 `error` 描述的响应体，默认状态码为 400，请求体超过 64 MB 时返回 413。
+The routes and response structure are identical in both versions. Every endpoint is a stateless call. Success returns HTTP 200; failure returns a body containing `ok: false` and an `error` description, with 400 as the default status code and 413 when the request body exceeds 64 MB.
 
-| 方法 | 路径 | 说明 |
+| Method | Path | Description |
 | --- | --- | --- |
-| GET | `/` | 返回网页界面 |
-| GET | `/api/library` | 人脸库规模统计，**仅返回数量，不返回目录路径** |
-| POST | `/api/query-set` | 查询图与本次上传的候选图比对（1:N） |
-| POST | `/api/query-library` | 查询图与人脸库全量比对（1:N） |
+| GET | `/` | Returns the web page |
+| GET | `/api/library` | Size statistics of the face library, **returning counts only, never the folder path** |
+| POST | `/api/query-set` | Compares the query image with the candidate images uploaded in the same request (1:N) |
+| POST | `/api/query-library` | Compares the query image with the whole face library (1:N) |
 
-### 🔧 通用参数
+### 🔧 Common Parameters
 
-| 参数 | 位置 | 取值 | 默认 | 适用版本 |
+| Parameter | Location | Accepted values | Default | Applies to |
 | --- | --- | --- | --- | --- |
-| `top_results` | 表单或查询串 | 整数，范围 1–100 | 10 | 两个版本 |
-| `detector` | 表单或查询串 | `cnn` 或 `hog` | `cnn` | 仅 dlib 版 |
+| `top_results` | Form or query string | Integer, range 1–100 | 10 | Both versions |
+| `detector` | Form or query string | `cnn` or `hog` | `cnn` | dlib version only |
 
-📌 `top_results` 的取值规则：**缺失或非数字 → 10**；能解析为整数 → **按边界截断**到 1–100（`0` → 1，`999` → 100）。
+📌 The rules for `top_results`: **missing or not a number → 10**; parsable as an integer → **clamped to the bounds** 1–100 (`0` → 1, `999` → 100).
 
-> ⚠️ 两个版本在此处存在细微差异：dlib 版用 `int()` 解析（接受 `+5`、前后空格等），InsightFace 版用 `str.isdigit()` 判定后再转换（不接受 `+5`、负号与 Unicode 数字）。传入 `top_results=-1` 时，dlib 版返回 1 条，InsightFace 版返回 10 条。正常从页面发起的请求不受影响。
+> ⚠️ The two versions differ slightly here: the dlib version parses with `int()` (which accepts `+5`, surrounding spaces and the like), while the InsightFace version tests with `str.isdigit()` first and only then converts (rejecting `+5`, a minus sign and Unicode digits). Given `top_results=-1`, the dlib version returns 1 row and the InsightFace version returns 10. Requests made normally from the page are unaffected.
 
-> ⚠️ dlib 版的 `GET /api/library` 会读取查询串中的 `detector`，因此**同一个 URL 在不同检测模式下会返回不同的 `faces` 数量**；InsightFace 版忽略该参数。
+> ⚠️ `GET /api/library` in the dlib version reads `detector` from the query string, so **the same URL returns a different `faces` count under different detection modes**; the InsightFace version ignores the parameter.
 
-### 📤 上传比对（`/api/query-set`）表单字段
+### 📤 Upload Comparison (`/api/query-set`) Form Fields
 
-| 字段 | 类型 | 必填 | 说明 |
+| Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `query` | 文件 | 是 | 查询图，单张 |
-| `candidates` | 文件（可多值） | 是 | 候选图，可多张 |
+| `query` | File | Yes | The query image, a single one |
+| `candidates` | File (repeatable) | Yes | The candidate images, one or more |
 
-### 🗂️ 人脸库检索（`/api/query-library`）表单字段
+### 🗂️ Library Search (`/api/query-library`) Form Fields
 
-| 字段 | 类型 | 必填 | 说明 |
+| Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `query` | 文件 | 是 | 查询图，单张 |
+| `query` | File | Yes | The query image, a single one |
 
-### ✅ 成功响应字段
+### ✅ Success Response Fields
 
-| 字段 | 说明 |
+| Field | Description |
 | --- | --- |
-| `ok` | 是否成功 |
-| `mode` | 检索模式，`query-set` 或 `query-library` |
-| `query` | 查询图文件名 |
-| `query_faces` | 查询图中检出人脸的数量 |
-| `detector` | 本次实际使用的检测模式（**仅 dlib 版返回**） |
-| `count` | 本次提交的候选图总数（**仅上传比对**） |
-| `compared` | 成功提取特征并参与比对的候选图数量（**仅上传比对**） |
-| `library_images` | 人脸库图片总数（**仅人脸库检索**） |
-| `library_faces` | 人脸库中检出人脸的总数（**仅人脸库检索**） |
-| `matches` | 排名结果列表，含 `rank`、`kind`、`candidate`、`similarity`，其中首项附带 `best: true` |
-| `skipped` | 被跳过的候选图及原因（**仅上传比对**） |
-| `elapsed_ms` | 服务端处理耗时（毫秒） |
+| `ok` | Whether the call succeeded |
+| `mode` | The retrieval mode, `query-set` or `query-library` |
+| `query` | The file name of the query image |
+| `query_faces` | The number of faces detected in the query image |
+| `detector` | The detection mode actually used (**dlib version only**) |
+| `count` | The total number of candidate images submitted (**upload comparison only**) |
+| `compared` | The number of candidate images that were successfully encoded and took part in the comparison (**upload comparison only**) |
+| `library_images` | The total number of images in the face library (**library search only**) |
+| `library_faces` | The total number of faces detected in the face library (**library search only**) |
+| `matches` | The ranked result list, holding `rank`, `kind`, `candidate` and `similarity`, where the first item also carries `best: true` |
+| `skipped` | The candidate images that were skipped, with the reason (**upload comparison only**) |
+| `elapsed_ms` | Server side processing time in milliseconds |
 
-`kind` 字段的取值：`query-set` 为「候选图片」，`query-library` 为「库中候选」。
+The values of the `kind` field: `query-set` gives "Uploaded candidate", `query-library` gives "Library candidate".
 
-### ❌ 常见错误
+### ❌ Common Errors
 
-| 状态码 | 场景 |
+| Status code | Situation |
 | --- | --- |
-| 400 | 未选择查询图、查询图多张、未选择候选图、候选图无可用人脸、人脸库为空、库中无人脸 |
-| 413 | 请求体超过 64 MB |
-| 500 | dlib 版缺少 CNN 检测器权重却仍在 CNN 模式下处理请求 |
+| 400 | No query image chosen, more than one query image, no candidate images chosen, no usable face among the candidates, the face library is empty, no face found in the library |
+| 413 | The request body exceeds 64 MB |
+| 500 | The dlib version is missing the CNN detector weights but is still asked to handle a request in CNN mode |
 
 ---
 
-## 🔒 安全与隐私
+## 🔒 Security and Privacy
 
-- ⚠️ **本项目不提供身份判定结论。** 仅输出相似度数值；「是否同一人」的阈值选择与由此产生的误判责任由使用方承担。
-- 🌐 **服务默认监听 `0.0.0.0`**，同一局域网内的其他主机均可访问。若仅限本机访问，请修改文件末尾 `app.run(...)` 中的 `host` 为 `127.0.0.1`。⚠️ 注意：终端打印的地址始终是 `http://127.0.0.1:<port>`，即使实际监听的是全部网卡——请勿以此判断暴露范围。
-- 🧠 **上传图片不落盘**：仅在内存中解码与计算，进程退出即释放。人脸库图片则被读取并缓存于进程内存。
-- 🕵️ **人脸库路径不外泄**：页面与接口均不展示、不接受该参数，路径仅存在于服务端进程内部（`/api/library` 只返回数量）。
-- 🕳️ **无鉴权机制**：程序未内置身份认证与访问控制。若部署于不可信网络，请务必在反向代理层补充鉴权措施。
-- 🐌 **不建议使用网络共享目录作为人脸库**：大量小文件的网络 I/O 会显著劣化性能。
-- ⚠️ **内置服务器为 Flask 开发服务器**，仅适用于内网小规模使用；生产环境请置于 Gunicorn、uWSGI 等 WSGI 服务器之后。
-
----
-
-## ⚠️ 已知限制
-
-- 🚫 不提供人脸检测结果的裁剪、旋转校正等人脸对齐增强：dlib 版仅使用默认关键点预测，InsightFace 版使用 SCRFD 自带的 5 点对齐。
-- 💾 特征缓存位于进程内存，服务重启后需重新编码整个库。
-- 📏 描述子分别来自 dlib ResNet（128 维）与 ArcFace（512 维），与其他人脸识别方案的分数**不可直接比较**；两个版本之间也不可比较。
-- 👥 上传比对时每张候选图片只取面积最大的人脸，多人合影中的其余人物不会成为独立候选（人脸库检索则会展开每张脸）。
-- 🚫 未提供批量离线比对接口与结果持久化能力。
-- ⚡ 硬件加速不可手动指定：dlib 版在本机验证环境中运行于 CPU；InsightFace 版在启动时自动探测 `CUDAExecutionProvider`，可用则优先使用 GPU，否则回退 CPU。使用者无法通过参数强制指定执行设备。
-- 🐛 InsightFace 版对 `top_results` 的非法 Unicode 数字（如 `²`）处理不完善，可能触发未捕获异常。
+- ⚠️ **This project does not produce an identity verdict.** It only outputs similarity numbers; choosing the "same person or not" threshold, and the misjudgments that follow from it, are the user's responsibility.
+- 🌐 **The service listens on `0.0.0.0` by default**, so any other host on the same LAN can reach it. To restrict it to this machine, change `host` to `127.0.0.1` in the `app.run(...)` call at the end of the file. ⚠️ Note: the address printed in the terminal is always `http://127.0.0.1:<port>`, even when every network interface is actually being listened on — do not use it to judge the exposure.
+- 🧠 **Uploaded images never touch the disk**: they are decoded and computed in memory only and released when the process exits. Face library images, on the other hand, are read and cached in process memory.
+- 🕵️ **The face library path never leaks**: neither the page nor the API displays or accepts it; the path exists only inside the server process (`/api/library` returns counts only).
+- 🕳️ **There is no authentication**: the program ships without identity verification or access control. If you deploy it on an untrusted network, be sure to add authentication in a reverse proxy layer.
+- 🐌 **Do not use a network share as the face library**: heavy small file network I/O noticeably degrades performance.
+- ⚠️ **The built-in server is the Flask development server**, suitable only for small scale use inside a private network; in production put it behind a WSGI server such as Gunicorn or uWSGI.
 
 ---
 
-## ❓ 常见问题
+## ⚠️ Known Limitations
 
-**❌ dlib 版启动时报找不到 `.dat` 权重文件**
-模型未位于程序可检索的位置。请参照[模型文件](#-模型文件权重下载)章节放置文件，或直接安装 `face_recognition_models` 模型包解决前两个必需权重。
-
-**❌ InsightFace 版启动后模型又被重新下载了**
-说明脚本同级的三个 `buffalo_l` 目录和 `~/.insightface/models/buffalo_l` 都没有同时包含 `det_10g.onnx` 与 `w600k_r50.onnx`——不完整的目录会被静默跳过。确认文件完整，或用 `--` 无参数直接看启动日志。
-
-**❌ 提示「人脸库里没有图片，请先放入图片后重试」**
-人脸库目录不存在，或其中不含受支持的图片格式。dlib 版可先用 `--library-info` 确认；InsightFace 版重新启动并在提示时输入正确目录。
-
-**❌ 提示「查询图片未检测到人脸」**
-当前检测器未检出人脸。dlib 版建议切换至「准确（CNN）」模式重试——CNN 对侧脸与小尺度人脸更为宽容；同时确认上传的是原始照片，而非截图中的局部裁剪。
-
-**❌ 提示「人脸库里没有检测到人脸」**
-人脸库中存在图片但均未检出人脸。可先查看实际检测数量，并抽查图片的清晰度与尺寸。
-
-**❓ 首次检索缓慢、后续迅速**
-符合预期行为。首次需编码整个库，结果缓存后后续请求为毫秒级。
-
-**❓ 端口被占用**
-两个版本都会自动向后顺延最多 20 个端口（5000–5019），请以终端输出的实际地址为准。
-
-**❓ 替换了图片但检索结果未变化**
-不应发生。缓存以文件修改时间判定，请确认修改的是库中同一路径的文件。
-
-**❓ 人脸库里两张同名图片都显示为 `zhang.jpg`**
-当前实现如此。「名称 (1)」「名称 (2)」的去重只作用于**上传比对**的结果，人脸库检索不做去重。
-
-**❓ 权重文件位于含中文的路径下能否使用**
-可以。dlib 版会自动将模型镜像至系统临时目录后加载；InsightFace 版无此限制。程序也会在多个候选路径中优先选择纯 ASCII 的那一个。
-
-**❓ 为什么某个候选没有分数 / 没出现在结果里**
-该图片读取失败或未检测到人脸。上传比对的响应中 `skipped` 字段会列出原因；人脸库检索会静默跳过，可用 `--library-info` 对比图片数与人脸数。
-
-**❓ 两个版本的分数能放在一起比较吗**
-不能。请参阅[分数口径](#-分数口径)，两者刻度不同，需分别标定阈值。
-
-**❓ 局域网里的同事打不开这个页面**
-两个版本默认绑定 `0.0.0.0`，理论上可访问；若无法连接，请检查系统防火墙是否放行了该端口。
+- 🚫 No face alignment enhancements such as cropping or rotation correction of detection results: the dlib version uses only the default landmark prediction, and the InsightFace version uses the 5 point alignment that comes with SCRFD.
+- 💾 The descriptor cache lives in process memory, so a restart means re-encoding the whole library.
+- 📏 The descriptors come from dlib ResNet (128 dimensions) and ArcFace (512 dimensions) respectively, so their scores are **not directly comparable** with those of other face recognition solutions; nor are the two versions comparable with each other.
+- 👥 In upload comparison only the largest face of each candidate image is used, so the other people in a group photo never become candidates of their own (library search does expand every face).
+- 🚫 There is no batch offline comparison endpoint and no result persistence.
+- ⚡ Hardware acceleration cannot be specified by hand: the dlib version ran on the CPU in the verification environment; the InsightFace version probes `CUDAExecutionProvider` at startup and prefers the GPU when available, otherwise falling back to the CPU. There is no argument to force an execution device.
+- 🐛 The InsightFace version handles invalid Unicode digits in `top_results` (such as `²`) badly and may raise an uncaught exception.
 
 ---
 
-## 📄 许可证
+## ❓ FAQ
 
-本项目基于 **GNU Affero General Public License v3.0** 授权。授权全文见 [`LICENSE`](./LICENSE) 或 <https://www.gnu.org/licenses/agpl-3.0.html>。
+**❌ The dlib version cannot find the `.dat` weight files at startup**
+The models are not in a place the program can search. See the [Model Files](#-model-files-weight-downloads) section for where to put them, or install the `face_recognition_models` pack to get the two required weights.
+
+**❌ The InsightFace version downloaded the models again after startup**
+That means none of the three `buffalo_l` folders next to the script, nor `~/.insightface/models/buffalo_l`, holds both `det_10g.onnx` and `w600k_r50.onnx` at once — incomplete folders are skipped silently. Check that the files are complete, or run it with `--` and no other argument to watch the startup log.
+
+**❌ It says "The face library has no images; add some images first and try again"**
+The face library folder does not exist, or holds no supported image format. In the dlib version check with `--library-info` first; in the InsightFace version restart and type the right folder when prompted.
+
+**❌ It says "query image no face detected: ..."**
+The current detector found no face in the query image. In the dlib version switch to "Accurate (CNN)" mode and try again — CNN is more forgiving with profile faces and small faces; also make sure you uploaded the original photo rather than a small crop taken from a screenshot.
+
+**❌ It says "No face detected in the face library; ..."**
+The library holds images but none of them yielded a face. Check the actual detected count first, and spot check the sharpness and size of the images.
+
+**❓ The first search is slow and later ones are fast**
+That is the expected behavior. The first run has to encode the whole library; once the results are cached, later requests are single digit milliseconds.
+
+**❓ The port is already in use**
+Both versions move forward automatically, at most 20 ports (5000–5019). Always go by the address actually printed in the terminal.
+
+**❓ I replaced an image but the search results did not change**
+That should not happen. The cache is decided by the file modification time, so check that you modified the file at that same path in the library.
+
+**❓ Two images of the same name in the library both show as `zhang.jpg`**
+That is how the current implementation works. The "name (1)", "name (2)" de-duplication applies to the **upload comparison** results only; library search does not de-duplicate.
+
+**❓ Can the weights live under a path with non-ASCII characters in it**
+Yes. The dlib version mirrors the model into the system temp directory before loading it; the InsightFace version has no such limitation. The program also prefers a pure ASCII path among several candidates.
+
+**❓ Why does a candidate have no score / not appear in the results**
+The image could not be read, or no face was detected in it. In the upload comparison response the `skipped` field lists the reason; library search skips silently, and `--library-info` lets you compare the image count with the face count.
+
+**❓ Can scores from the two versions be compared together**
+No. See [Score Semantics](#-score-semantics); the scales differ, so calibrate each threshold separately.
+
+**❓ A colleague on the LAN cannot open this page**
+Both versions bind `0.0.0.0` by default, so in theory it is reachable; if the connection fails, check whether the system firewall allows that port.
+
+---
+
+## 📄 License
+
+This project is licensed under the **GNU Affero General Public License v3.0**. The full text is in [`LICENSE`](./LICENSE) or at <https://www.gnu.org/licenses/agpl-3.0.html>.
 
 ```
 Copyright (C) 2026 Alex Walker
 ```
 
-**⚠️ AGPL-3.0 特别提示**：若您通过网络向用户提供本程序的运行服务，则**必须**同时向这些用户提供本程序的完整对应源码（含你对本程序所做的修改）。这是 AGPL-3.0 相比 GPL 的核心要求。
+**⚠️ Special note on AGPL-3.0**: if you offer this program as a running service to users over a network, you **must** also give those users the complete corresponding source code of the program (including your modifications to it). This is the core requirement AGPL-3.0 adds on top of GPL.
 
-本项目按「原样提供」方式发布，不附带任何明示或默示担保。作者及版权持有者不对使用本程序产生的任何直接或间接损失承担责任。
+This project is released "as is", with no warranty of any kind, express or implied. The authors and copyright holders are not liable for any direct or indirect loss arising from the use of this program.

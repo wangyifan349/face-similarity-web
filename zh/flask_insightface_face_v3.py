@@ -1,43 +1,36 @@
-"""Face Similarity Web (InsightFace).
+"""人脸相似度网页版（InsightFace）。
 
-On startup it asks which folder holds your face photos, then brings the web
-service up: open the page, pick one query image, then pick a set of candidate
-images, and you see how much each candidate resembles the query; or let the
-query image be compared against your face folder. Faces are detected by SCRFD
-and described by ArcFace, every face becomes a 512-d descriptor (L2
-normalized), and the score is the cosine similarity of two face descriptors
-times 100. Different photos of the same person measure 77-79 here, different
-people -3 to +1. This program does not decide for you whether two faces are
-"the same person": calibrate that threshold on your own samples.
+启动后会先问你人脸图片放在哪个文件夹，问完就把网页服务跑起来：打开页面，
+选一张查询图，再选一组候选图，就能看到每张候选图跟查询图有多像；或者让
+查询图去和你的人脸文件夹比。人脸由 SCRFD 检测、ArcFace 描述，每张脸变成
+512 维特征（做过 L2 归一化），得分是两张脸特征的余弦相似度乘以 100。同一个
+人的不同照片实测 77-79，不同的人 -3 到 +1。这个程序不替你判定"是不是同一
+个人"，阈值要拿自己的样本定。
 
-Scores come from ArcFace, which is not the same model as the dlib version
-(flask_face_match_v2.py), so the numbers cannot be compared across the two. The
-page layout, the colors and the fixed 0-100 similarity bar are the same as in
-the dlib version, with two differences: there is no detection mode picker
-(SCRFD is the only detector), and the results carry no detector field.
+分数来自 ArcFace，和 dlib 版（flask_face_match_v2.py）不是同一个模型，数值
+不能互相比较。网页的布局、配色和那条固定 0-100 的相似度条跟 dlib 版一样，
+只有两处不同：没有检测方式下拉框（SCRFD 是唯一检测器），结果里也没有
+detector 字段。
 
-Install the dependencies (Python 3.9 or newer):
+装依赖（Python 3.9 及以上）：
 
     pip install flask opencv-python numpy insightface onnxruntime
 
-To use an NVIDIA GPU, swap onnxruntime for onnxruntime-gpu.
+有 N 卡想用 GPU，把 onnxruntime 换成 onnxruntime-gpu。
 
-Run it:
+跑起来：
 
     python flask_insightface_face_v3.py
 
-Then type the face library folder when prompted; pressing Enter uses
-face_library next to this script. Images may be .jpg .jpeg .png .bmp .webp and
-may live in subfolders. The page neither shows nor accepts a folder path, so
-only you know where it is.
+然后照提示输入人脸库文件夹，直接回车就用脚本同级的 face_library。图片支持
+.jpg .jpeg .png .bmp .webp，可以有子目录。页面上不显示也不接受文件夹路径，
+所以这个位置只有你启动时知道。
 
-The buffalo_l models (about 300 MB) are downloaded automatically on first run
-into ~/.insightface/models/buffalo_l; when insightface_models/buffalo_l or
-models/buffalo_l already sits next to this script they are used in place, with
-no network access.
+buffalo_l 模型（约 300 MB）在首次运行时自动下载到 ~/.insightface/models/
+buffalo_l；脚本同级已经有 insightface_models/buffalo_l 或 models/buffalo_l 时
+就地使用，不联网。
 
-Every setting is either in the code or asked for at runtime; no environment
-variable is ever read.
+所有配置都写在代码里或运行时问你要，不读任何环境变量。
 """
 
 import socket
@@ -53,46 +46,41 @@ import numpy as np
 import onnxruntime
 from flask import Flask, jsonify, render_template_string, request
 
-# Only the detection and recognition models of buffalo_l are loaded. The
-# landmarks and the gender/age models are never used, and loading them would
-# only slow startup.
+# 只加载 buffalo_l 里的检测和识别两个模型。关键点和性别年龄模型用不上，
+# 加载它们只会拖慢启动。
 ALLOWED_MODULES = ["detection", "recognition"]
 REQUIRED_MODEL_FILES = ("det_10g.onnx", "w600k_r50.onnx")
 MODEL_FOLDER = Path("~/.insightface").expanduser() / "models" / "buffalo_l"
 SUPPORTED_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".bmp", ".webp"})
 SCRIPT_DIRECTORY = Path(__file__).resolve().parent
 
-# The InsightFace landmarks model calls a deprecated scikit-image interface
-# and warns once per detected face. Similarity scoring does not need that
-# notice, so it is switched off once and for all here.
+# InsightFace 的关键点模型调用了 scikit-image 的旧接口，每检测到一张脸就警告
+# 一次。做相似度不需要这个提示，所以在这里统一关掉一次。
 warnings.filterwarnings("ignore", message=r".*estimate.*is deprecated.*")
 warnings.filterwarnings("ignore", category=FutureWarning, module="insightface.*")
 
-# The face library folder, filled in by the question asked at startup; it is
-# used from then on.
+# 人脸库文件夹，由启动时的询问填进来；之后一直用它。
 LIBRARY_FOLDER = SCRIPT_DIRECTORY / "face_library"
 
-# The already loaded FaceAnalysis. Building it takes more than two seconds, so
-# it is built once and every request then uses it.
+# 已加载的 FaceAnalysis。构造它要两秒多，所以只做一次，之后每个请求都用它。
 FACE_APP = None
 MODEL_SUMMARY = ""
 
-# folder -> (modified time, the descriptor of every face in that file)
+# 文件夹 -> (修改时间, 该文件里每张脸的特征)
 LIBRARY_CACHE = {}
 LIBRARY_LOCK = threading.Lock()
 
 
 # =============================================================================
-# Finding and loading the models
+# 找模型、加载模型
 # =============================================================================
 
 
 def find_model_directory() -> Optional[Path]:
-    """A buffalo_l folder that is already on disk, or None when there is none.
+    """已经在磁盘上的 buffalo_l 目录，找不到就返回 None。
 
-    Next to this script wins, so shipping the models beside the program makes
-    it run offline; only when there is really nothing is InsightFace allowed
-    to download.
+    脚本同级优先，这样把模型放在程序旁边就能离线跑；实在没有才让
+    InsightFace 去下载。
     """
     places = [
         SCRIPT_DIRECTORY / "insightface_models" / "buffalo_l",
@@ -114,9 +102,9 @@ def find_model_directory() -> Optional[Path]:
 
 
 def load_model() -> str:
-    """Load the detection and recognition models, return a one line log summary.
+    """加载检测和识别模型，返回一行给日志看的说明。
 
-    Runs once per process; every later request uses FACE_APP directly.
+    只在这个进程里执行一次，之后的请求直接用 FACE_APP。
     """
     global FACE_APP
     global MODEL_SUMMARY
@@ -130,14 +118,14 @@ def load_model() -> str:
 
     found = find_model_directory()
     if found is None:
-        # Let InsightFace download into MODEL_FOLDER itself.
+        # 让 InsightFace 自己去 MODEL_FOLDER 下载。
         FACE_APP = FaceAnalysis(
             name="buffalo_l",
             root=str(MODEL_FOLDER.parents[1]),
             providers=providers,
             allowed_modules=ALLOWED_MODULES,
         )
-        where = f"{MODEL_FOLDER} (downloaded this run)"
+        where = f"{MODEL_FOLDER}（本次下载）"
     else:
         FACE_APP = FaceAnalysis(
             name=str(found),
@@ -146,7 +134,7 @@ def load_model() -> str:
         )
         where = str(found)
 
-    # ctx_id only means something with the CUDA backend.
+    # ctx_id 只有在 CUDA 后端下才有意义。
     ctx_id = 0 if providers[0] == "CUDAExecutionProvider" else -1
     FACE_APP.prepare(ctx_id=ctx_id, det_size=(640, 640), det_thresh=0.5)
 
@@ -155,73 +143,71 @@ def load_model() -> str:
     )
     return MODEL_SUMMARY
 
+
 def get_app():
-    """The already loaded models, loading them first if needed."""
+    """已经加载好的模型，必要时先加载。"""
     if FACE_APP is None:
         load_model()
     return FACE_APP
 
 
 # =============================================================================
-# Turning every kind of input into a BGR array
+# 把各种输入统一成 BGR 数组
 #
-# Everything below this point accepts one shape only: a contiguous BGR uint8
-# array, which is what both OpenCV and InsightFace want.
+# 往下的代码只认一种形状：连续的 BGR uint8 数组，OpenCV 和 InsightFace 都
+# 要这个格式。
 # =============================================================================
-
 
 ImageInput = Union[str, Path, bytes, bytearray, np.ndarray]
 
 
 def to_bgr_array(image: ImageInput, input_is_bgr: bool = True) -> np.ndarray:
-    """Normalize a path, a blob of bytes or an array into a contiguous BGR
-    uint8 array.
+    """把路径、字节或数组统一成连续的 BGR uint8 数组。
 
-    input_is_bgr=True means the array handed in is already in BGR order (that
-    is OpenCV's own order, hence the default); False means it is RGB, and this
-    function converts it to BGR. The flag has no effect for a path or bytes.
+    input_is_bgr=True 表示传进来的数组已经是 BGR 顺序（OpenCV 自己就是这个
+    顺序，默认值）；传 False 表示它是 RGB，这里负责翻成 BGR。给路径或字节时
+    这个参数不起作用。
     """
     if isinstance(image, np.ndarray):
         if image.ndim == 2:
-            array = np.repeat(image[:, :, None], 3, axis=2)      # gray to 3 channels
+            array = np.repeat(image[:, :, None], 3, axis=2)      # 灰度变三通道
         elif input_is_bgr:
             array = image
         else:
-            array = image[:, :, ::-1]                              # RGB to BGR
+            array = image[:, :, ::-1]                              # RGB 变 BGR
         if array.dtype != np.uint8:
-            # The other common convention is a float array in [0, 1].
+            # 另一种常见约定是 [0, 1] 的浮点数组。
             if np.issubdtype(array.dtype, np.floating) and array.size > 0:
                 if float(np.nanmax(array)) <= 1.0:
                     array = array * 255.0
             array = np.clip(array, 0, 255).astype("uint8")
         return np.ascontiguousarray(array)
 
-    # cv2.imread cannot open a non-ASCII path on Windows, so the bytes are read
-    # here and decoded below; every kind of input goes through this one path.
+    # cv2.imread 读不了 Windows 上的中文路径，所以自己读字节再解码，
+    # 所有输入类型都走这一条路。
     if isinstance(image, (bytes, bytearray)):
         data = bytes(image)
     else:
         image_path = Path(image)
         if not image_path.is_file():
-            raise FileNotFoundError(f"Image does not exist: {image_path}")
+            raise FileNotFoundError(f"图片不存在：{image_path}")
         data = image_path.read_bytes()
 
     decoded = cv2.imdecode(np.frombuffer(data, dtype="uint8"), cv2.IMREAD_COLOR)
     if decoded is None:
-        raise ValueError("Image cannot be decoded; it may be corrupted or not an image")
+        raise ValueError("图片无法解码，可能已损坏或不是图片")
     return np.ascontiguousarray(decoded)
 
 
 # =============================================================================
-# Descriptors and scores
+# 提特征、算分数
 #
-# This block is the whole engine. The web part only carries images and JSON
-# around and does nothing else.
+# 这一段是整个引擎。网页那部分只负责搬图片和搬 JSON，别的什么都不做。
 # =============================================================================
 
 
 def _face_box_area(face) -> float:
-    """The area of a detection box, in pixels."""
+    """检测框的面积，单位像素。"""
     x1 = float(face.bbox[0])
     y1 = float(face.bbox[1])
     x2 = float(face.bbox[2])
@@ -234,7 +220,7 @@ def _face_box_area(face) -> float:
 
 
 def _l2_normalized(vector) -> Optional[np.ndarray]:
-    """One descriptor divided by its own length. An all zero vector gives None."""
+    """一个特征向量除以自己的长度。全零向量返回 None。"""
     array = np.asarray(vector, dtype="float32").reshape(-1)
     length = float(np.linalg.norm(array))
     if length == 0.0:
@@ -243,11 +229,10 @@ def _l2_normalized(vector) -> Optional[np.ndarray]:
 
 
 def encode_faces(image: ImageInput, input_is_bgr: bool = True) -> list:
-    """One 512-d descriptor per face in the image, already L2 normalized.
+    """图片里每张脸一个 512 维特征，已经 L2 归一化。
 
-    Sorted by detection box area from large to small, so element 0 is the
-    biggest face in the photo and the caller never has to care how many faces
-    there are. Returns an empty list when no face is detected.
+    按人脸框面积从大到小排好，所以第 0 个就是照片里最大的那张脸，调用方
+    不用再关心一张图里有几张脸。没有检测到人脸就返回空列表。
     """
     detected = encode_faces_with_scores(image, input_is_bgr)
     embeddings = []
@@ -259,19 +244,17 @@ def encode_faces(image: ImageInput, input_is_bgr: bool = True) -> list:
 def encode_faces_with_scores(
     image: ImageInput, input_is_bgr: bool = True
 ) -> list:
-    """Like encode_faces, plus the detector's own confidence and box area.
+    """和 encode_faces 一样，额外带上检测器自己的置信度和框面积。
 
-    Each item is {"embedding": descriptor, "det_score": detection confidence,
-    "area": box area}. Only needed when you want to know how sure the detector
-    was.
+    每项是 {"embedding": 特征, "det_score": 检测置信度, "area": 框面积}。
+    想知道检测器有多确定时才需要用这个。
     """
     faces = get_app().get(to_bgr_array(image, input_is_bgr))
 
     results = []
     for face in faces:
-        # `or []` cannot be used here: a descriptor is a NumPy array, and
-        # testing an array for truth raises "truth value of an array with more
-        # than one element is ambiguous".
+        # 这里不能写 `or []`：特征是 NumPy 数组，对数组判断真假会报
+        # "truth value of an array with more than one element is ambiguous"。
         embedding = getattr(face, "embedding", None)
         if embedding is None:
             continue
@@ -286,27 +269,26 @@ def encode_faces_with_scores(
             }
         )
 
-    # Biggest first, so the caller can take element 0 as *the* face of a photo.
+    # 大的在前，调用方可以直接拿第 0 个当"这张照片的人"。
     results.sort(key=lambda row: row["area"], reverse=True)
     return results
 
 
 def cosine_similarity_percent(first: np.ndarray, second: np.ndarray) -> float:
-    """The cosine similarity of two descriptors, expressed as a percentage."""
+    """两个特征的余弦相似度，换算成百分数。"""
     left = np.asarray(first, dtype="float32").reshape(-1)
     right = np.asarray(second, dtype="float32").reshape(-1)
     if left.size != right.size:
-        raise ValueError(f"Descriptor sizes differ: {left.size} and {right.size}")
+        raise ValueError(f"特征长度不一致：{left.size} 和 {right.size}")
     return float(np.dot(left, right)) * 100.0
 
 
 def best_pair_percent(first_faces: Sequence, second_faces: Sequence,
                       largest_only: bool = False) -> float:
-    """The highest score between two photos.
+    """两张照片之间最高的那个分数。
 
-    Group photos line up on their own, no matter how many faces each side
-    holds. With largest_only=True only the biggest face of each side is
-    compared.
+    合影默认就能对上，不用管每边有几张脸。largest_only=True 时只比每边最大
+    的那张脸。
     """
     if largest_only:
         return cosine_similarity_percent(first_faces[0], second_faces[0])
@@ -321,12 +303,11 @@ def best_pair_percent(first_faces: Sequence, second_faces: Sequence,
 
 
 def best_scores_percent(query_faces: Sequence, candidate_faces: Sequence) -> list:
-    """One best score per candidate, in the candidates' original order.
+    """每个候选各出一个最高分，按候选原来的顺序排好。
 
-    The query image may hold several faces (a group photo), so every candidate
-    is scored against the query face that fits it best. It is all done with a
-    single matrix multiplication rather than nested Python loops, which makes
-    a clear difference on a large library.
+    查询图可能有多张脸（合影），所以每个候选都去和查询图里最合的那张脸比。
+    用一次矩阵乘法算完，而不是在 Python 里一层层循环，人脸库大的时候差别
+    很明显。
     """
     query_matrix = np.vstack(query_faces).astype("float32")
     candidate_matrix = np.vstack(candidate_faces).astype("float32")
@@ -339,16 +320,13 @@ def face_similarity_percent(
     input_is_bgr: bool = True,
     largest_only: bool = False,
 ) -> Optional[float]:
-    """Face similarity between two images, as a percentage.
+    """两张图片之间的人脸相似度，百分数。
 
-    See to_bgr_array for what input_is_bgr means. With largest_only=True only
-    the biggest face of each image is compared; by default every pair of faces
-    is compared and the highest score wins, so a group photo needs no cropping
-    first.
+    input_is_bgr 的意思见 to_bgr_array。largest_only=True 时每张图只取最大
+    的那张脸来比；默认是所有脸两两比，取最高分，合影不用先裁脸。
 
-    Returns None when no face is detected in one of the images. A higher score
-    means more alike; different photos of the same person measure 77-79 here,
-    different people -3 to +1.
+    有一张图里检测不到人脸就返回 None。分数越高越像，实测同一个人不同照片
+    77-79，不同的人 -3 到 +1。
     """
     faces_a = encode_faces(image_a, input_is_bgr)
     faces_b = encode_faces(image_b, input_is_bgr)
@@ -356,8 +334,7 @@ def face_similarity_percent(
         return None
 
     score = best_pair_percent(faces_a, faces_b, largest_only)
-    # Floating point drift can push the result slightly out of range; clamp it
-    # back into -100 to 100.
+    # 浮点误差可能让结果稍微越界，压回 -100 到 100。
     if score > 100.0:
         return 100.0
     if score < -100.0:
@@ -366,18 +343,16 @@ def face_similarity_percent(
 
 
 # =============================================================================
-# The face library
+# 人脸库
 #
-# The face library is simply any folder full of images. Encoding a whole
-# library takes a while, so every file is encoded once and cached, with the
-# file's modified time deciding whether it is still valid: edit, add or delete
-# an image and the next comparison shows it.
+# 人脸库就是任何一个装图片的文件夹。整个库算一遍要花不少时间，所以每个文件
+# 只算一次，缓存起来，并且用文件的修改时间判断有没有变：改了、加了、删了图，
+# 下一次比对就能看出来。
 # =============================================================================
 
 
 def library_images() -> list:
-    """Every image in the face library folder, subfolders included, in a
-    stable order."""
+    """人脸库文件夹里所有图片，含子目录，顺序固定。"""
     found = []
     if not LIBRARY_FOLDER.is_dir():
         return found
@@ -389,16 +364,15 @@ def library_images() -> list:
 
 
 def _embeddings_of(path: Path) -> list:
-    """The descriptors of every face in one file, taken from cache when the
-    file has not changed.
+    """一个文件里所有脸的特征，文件没变就直接用缓存。
 
-    A file that cannot be read, or that holds no face, gives an empty list
-    rather than an error: one bad photo must not take the whole library down.
+    读不了或者里面没有人脸的，返回空列表而不是报错：一张坏图不该把整个
+    人脸库拖垮。
     """
     try:
         modified_time = path.stat().st_mtime
     except OSError:
-        return []          # deleted between the folder scan and now
+        return []          # 刚扫描完就被删掉了
 
     key = str(path)
     cached = LIBRARY_CACHE.get(key)
@@ -415,23 +389,21 @@ def _embeddings_of(path: Path) -> list:
 
 
 def load_library() -> tuple:
-    """Every face in the library, returned as (list of labels, descriptor
-    matrix).
+    """人脸库里每一张脸，返回 (名字列表, 特征矩阵)。
 
-    A label is the file name; when one photo holds several faces " #2" and
-    " #3" are appended. The matrix has one row per label, in the same order.
+    名字就是文件名；一张照片里有好几张脸时后面加 " #2"、" #3"。特征矩阵
+    一行对应一个名字，顺序一致。
     """
     images = library_images()
     labels = []
     embeddings = []
     alive = []
 
-    # One library scan at a time: the ONNX session and the detection network
-    # both suffer when two requests crowd them.
+    # 一次只让一个人扫库：ONNX 会话和检测网络都怕两个请求挤在一起。
     with LIBRARY_LOCK:
         for index, path in enumerate(images, start=1):
             if len(images) >= 20:
-                print(f"  Loading library {index}/{len(images)}  {path.name}", flush=True)
+                print(f"  载入人脸库 {index}/{len(images)}  {path.name}", flush=True)
 
             alive.append(str(path))
             position = 0
@@ -443,7 +415,7 @@ def load_library() -> tuple:
                     labels.append(f"{path.name} #{position}")
                 embeddings.append(embedding)
 
-        # Images deleted from the library have their cache entries dropped too.
+        # 从人脸库里删掉的图，缓存也一起清掉。
         for key in list(LIBRARY_CACHE):
             if key not in alive:
                 del LIBRARY_CACHE[key]
@@ -454,7 +426,7 @@ def load_library() -> tuple:
 
 
 # =============================================================================
-# Turning scores into a result table
+# 分数变成结果表
 # =============================================================================
 
 
@@ -465,16 +437,14 @@ def rank_matches(
     group_label: str,
     top_results: int,
 ) -> list:
-    """Score every candidate against the query image and keep only the top few.
+    """每个候选都跟查询图比一遍，只留下前几名。
 
-    labels holds the display name of each candidate, in the same order as
-    candidate_faces. group_label says where the candidates came from and is
-    shown as the "kind" of every row ("Uploaded candidate" for uploads,
-    "Library candidate" for the face library).
+    labels 是每个候选显示用的名字，顺序和 candidate_faces 一致。group_label
+    说明候选来自哪里，会作为每行的 "kind" 显示出来（上传的是"候选图片"，
+    人脸库里的是"库中候选"）。
 
-    The rows returned are {"rank", "kind", "candidate", "similarity"}, with
-    "best": True added to the first one. An empty list comes back when there
-    are no candidates.
+    返回的行是 {"rank", "kind", "candidate", "similarity"}，第一名多一个
+    "best": True。没有候选就返回空列表。
     """
     scores = best_scores_percent(query_faces, candidate_faces)
     order = np.argsort(-scores)
@@ -497,8 +467,7 @@ def rank_matches(
 
 
 def disambiguate(names: list) -> list:
-    """Number files that share a name, so no two rows of the result table look
-    exactly alike."""
+    """重名的文件后面加上序号，免得结果表里两行长得一模一样。"""
     totals = {}
     for name in names:
         totals[name] = totals.get(name, 0) + 1
@@ -513,21 +482,21 @@ def disambiguate(names: list) -> list:
         labels.append(f"{name} ({seen[name]})")
     return labels
 
-# =============================================================================
-# The web page
-# =============================================================================
 
+# =============================================================================
+# 网页
+# =============================================================================
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 64 * 1024 * 1024
 
 
 class RequestError(Exception):
-    """Something about this request is wrong; the message is shown to the user."""
+    """这次请求有问题，消息是给用户看的。"""
 
 
 def error_response(message: str, status: int = 400):
-    """The one error body both the page and a person reading the API see."""
+    """页面和直接调接口的人看到的同一种出错格式。"""
     return jsonify({"ok": False, "error": message}), status
 
 
@@ -538,11 +507,11 @@ def handle_request_error(error: RequestError):
 
 @app.errorhandler(413)
 def handle_too_large(_error):
-    return error_response("Uploaded file is too large, the limit per request is 64 MB", 413)
+    return error_response("上传文件太大，单次请求上限 64 MB", 413)
 
 
 def read_uploads(field_name: str) -> list:
-    """Every uploaded file of a field, as (filename, bytes) pairs."""
+    """某个字段里上传的所有文件，(文件名, 字节内容)。"""
     uploads = []
     for item in request.files.getlist(field_name):
         if item and item.filename:
@@ -551,36 +520,34 @@ def read_uploads(field_name: str) -> list:
 
 
 def encode_upload(data: bytes, label: str, file_name: str) -> list:
-    """The descriptors of every face in one uploaded image.
+    """一张上传图片里所有脸的特征。
 
-    An unusable image (decode failure, corrupted, no face inside) raises
-    RequestError right away; the message names the offending file, and label
-    is "Query image" or "Candidate image".
+    图片不能用（解码失败、损坏、里面没有人脸）就直接报 RequestError，消息
+    里带上是哪张图，label 是"查询图片"或"候选图片"。
     """
     try:
         faces = encode_faces(data)
     except (OSError, ValueError) as error:
-        raise RequestError(f"{label} could not be processed: {error}: {file_name}")
+        raise RequestError(f"{label}处理失败：{error}：{file_name}")
     if not faces:
-        raise RequestError(f"No face detected in {label.lower()}: {file_name}")
+        raise RequestError(f"{label}未检测到人脸：{file_name}")
     return faces
 
 
 def query_from_request() -> tuple:
-    """The query image of this request, as (filename, descriptors of every
-    face)."""
+    """这次请求的查询图，(文件名, 所有脸的特征)。"""
     uploads = read_uploads("query")
     if not uploads:
-        raise RequestError("Please choose one query image")
+        raise RequestError("请选择一张查询图片")
     if len(uploads) > 1:
-        raise RequestError("Only one query image may be selected")
+        raise RequestError("查询图片只能选一张")
 
     name, data = uploads[0]
-    return name, encode_upload(data, "Query image", name)
+    return name, encode_upload(data, "查询图片", name)
 
 
 def top_results_from_request() -> int:
-    """How many rows to return; anything out of range is clamped."""
+    """要返回前几名，超出范围的按边界算。"""
     raw_value = request.form.get("top_results") or request.args.get("top_results") or ""
     text = str(raw_value).strip()
     if not text.isdigit():
@@ -593,14 +560,14 @@ def top_results_from_request() -> int:
     return wanted
 
 
-# -------------------- The page --------------------
+# -------------------- 页面 --------------------
 PAGE = """
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Face Similarity</title>
+<title>人脸相似度</title>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
       rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
@@ -662,7 +629,7 @@ PAGE = """
   html, body { height: 100%; }
   body {
     background: #f6f3f0;
-    font-family: system-ui, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-family: system-ui, "Microsoft YaHei", "Segoe UI", sans-serif;
   }
   /* Keep every accent orange-red: no blue anywhere. */
   .btn { --bs-btn-focus-shadow-rgb: 232, 89, 12; }
@@ -739,11 +706,11 @@ PAGE = """
 
   <div class="d-flex flex-wrap align-items-end justify-content-between gap-3 mb-3 px-2">
     <div>
-      <h1 class="h3 mb-1" style="color:#7a2e0a">Face Similarity</h1>
-      <div class="text-secondary">Upload Comparison &middot; Library Search</div>
+      <h1 class="h3 mb-1" style="color:#7a2e0a">人脸相似度</h1>
+      <div class="text-secondary">上传比对 · 人脸库检索</div>
     </div>
     <div class="text-end">
-      <span class="badge rounded-pill text-bg-light border" id="libraryBadge">Loading library&hellip;</span>
+      <span class="badge rounded-pill text-bg-light border" id="libraryBadge">人脸库载入中…</span>
     </div>
   </div>
 
@@ -751,30 +718,30 @@ PAGE = """
     <div class="col-6">
       <div class="panel">
         <div class="panel-body">
-          <div class="panel-title mb-1"><span class="step">1</span>Query image vs candidate images (1:N)</div>
-          <p class="form-text mb-3">One query image, compared one by one with the candidate images picked below. The local face library is <strong>not</strong> used.</p>
+          <div class="panel-title mb-1"><span class="step">1</span>查询图 vs 候选图片（1:N）</div>
+          <p class="form-text mb-3">一张查询图，逐个和下面选中的候选图比对，<strong>不使用</strong>本地人脸库。</p>
           <form id="queryForm" novalidate>
             <div class="mb-3">
-              <label class="form-label fw-semibold" for="queryFile">① Query image (single)</label>
+              <label class="form-label fw-semibold" for="queryFile">① 查询图片（单张）</label>
               <input class="form-control form-control-lg" type="file" id="queryFile"
                      name="query" accept="image/*" required>
-              <div class="form-text" data-summary="queryFile">e.g. who-is-this.jpg</div>
+              <div class="form-text" data-summary="queryFile">例如：查询这是谁.jpg</div>
               <div class="d-flex flex-wrap gap-2 mt-2" data-preview="queryFile"></div>
             </div>
             <div class="mb-3">
-              <label class="form-label fw-semibold" for="candidateFiles">② Candidate images (multiple)</label>
+              <label class="form-label fw-semibold" for="candidateFiles">② 候选图片（可多选）</label>
               <input class="form-control form-control-lg" type="file" id="candidateFiles"
                      name="candidates" accept="image/*" multiple required>
-              <div class="form-text" data-summary="candidateFiles">e.g. user1.jpg, user2.jpg</div>
+              <div class="form-text" data-summary="candidateFiles">例如：1用户1.jpg、2用户2.jpg</div>
               <div class="d-flex flex-wrap gap-2 mt-2" data-preview="candidateFiles"></div>
             </div>
             <div class="mb-4" style="max-width: 12rem">
-              <label class="form-label fw-semibold" for="queryTop">Results to return</label>
+              <label class="form-label fw-semibold" for="queryTop">返回条数</label>
               <input class="form-control form-control-lg" type="number" id="queryTop"
                      name="top_results" value="{{ top_results }}" min="{{ top_results_min }}" max="{{ top_results_max }}">
             </div>
             <button class="btn btn-primary btn-lg w-100" type="submit" id="querySubmit">
-              Start comparison
+              开始比对
             </button>
           </form>
         </div>
@@ -784,23 +751,23 @@ PAGE = """
     <div class="col-6">
       <div class="panel">
         <div class="panel-body">
-          <div class="panel-title mb-1"><span class="step">2</span>Query image vs face library (1:N)</div>
-          <p class="form-text mb-3">One query image, compared with <b>every</b> image in the face library; the closest matches are returned automatically.</p>
+          <div class="panel-title mb-1"><span class="step">2</span>查询图 vs 人脸库（1:N）</div>
+          <p class="form-text mb-3">一张查询图，对比人脸库里的<b>全部</b>图片，自动返回最像的几张。</p>
           <form id="libraryForm" novalidate>
             <div class="mb-3">
-              <label class="form-label fw-semibold" for="libraryQuery">① Query image (single)</label>
+              <label class="form-label fw-semibold" for="libraryQuery">① 查询图片（单张）</label>
               <input class="form-control form-control-lg" type="file" id="libraryQuery"
                      name="query" accept="image/*" required>
-              <div class="form-text" data-summary="libraryQuery">e.g. who-is-this.jpg</div>
+              <div class="form-text" data-summary="libraryQuery">例如：查询这是谁.jpg</div>
               <div class="d-flex flex-wrap gap-2 mt-2" data-preview="libraryQuery"></div>
             </div>
             <div class="mb-4" style="max-width: 12rem">
-              <label class="form-label fw-semibold" for="libraryTop">Results to return</label>
+              <label class="form-label fw-semibold" for="libraryTop">返回条数</label>
               <input class="form-control form-control-lg" type="number" id="libraryTop"
                      name="top_results" value="{{ top_results }}" min="{{ top_results_min }}" max="{{ top_results_max }}">
             </div>
             <button class="btn btn-primary btn-lg w-100" type="submit" id="librarySubmit">
-              Search library
+              搜索人脸库
             </button>
           </form>
         </div>
@@ -813,11 +780,11 @@ PAGE = """
       <div class="panel">
         <div class="panel-body">
           <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
-            <div class="panel-title mb-0"><span class="step">3</span>Results</div>
+            <div class="panel-title mb-0"><span class="step">3</span>结果</div>
             <div class="form-text" id="resultMeta"></div>
           </div>
           <div id="resultAlert"></div>
-          <div id="resultBody" class="empty-state">No comparison has been run yet.</div>
+          <div id="resultBody" class="empty-state">尚未发起比对。</div>
         </div>
       </div>
     </div>
@@ -837,14 +804,14 @@ function escapeHtml(value) {
 function setLoading(button, loading, idleText) {
   button.disabled = loading;
   button.innerHTML = loading
-    ? '<span class="spinner me-2"></span>Comparing&hellip;'
+    ? '<span class="spinner me-2"></span>比对中…'
     : idleText;
 }
 
 function showError(message) {
   $("resultAlert").innerHTML =
     '<div class="alert alert-brand alert-dismissible fade show" role="alert">' +
-    '<strong>Error: </strong>' + escapeHtml(message) +
+    '<strong>出错了：</strong>' + escapeHtml(message) +
     '<button type="button" class="btn-close" data-bs-dismiss="alert"></button></div>';
   $("resultBody").innerHTML = "";
   $("resultMeta").textContent = "";
@@ -852,7 +819,7 @@ function showError(message) {
 
 function resultTable(rows) {
   if (!rows || !rows.length) {
-    return '<p class="empty-state mb-0">Nothing to compare.</p>';
+    return '<p class="empty-state mb-0">没有可比较的对象。</p>';
   }
   // The bar length is the similarity itself on a fixed 0-100 scale, so it
   // always matches the percentage printed next to it.
@@ -871,30 +838,30 @@ function resultTable(rows) {
     </tr>`;
   }).join("");
   return `<table class="table table-sm align-middle mb-0">
-    <thead><tr><th>Rank</th><th>${escapeHtml(rows[0].kind || "Candidate")}</th><th>Similarity</th><th></th></tr></thead>
+    <thead><tr><th>排名</th><th>${escapeHtml(rows[0].kind || "候选")}</th><th>相似度</th><th></th></tr></thead>
     <tbody>${body}</tbody></table>
-    <p class="form-text mt-2 mb-0">The bar length is the similarity percentage; a full bar is 100%.</p>`;
+    <p class="form-text mt-2 mb-0">横条长度就是相似度百分比，满条为 100%。</p>`;
 }
 
 function skippedList(skipped) {
   if (!skipped || !skipped.length) return "";
-  return '<p class="form-text mt-3 mb-0">Skipped: '
-    + skipped.map((item) => escapeHtml(item.name) + " (" + escapeHtml(item.status) + ")").join(", ")
+  return '<p class="form-text mt-3 mb-0">跳过：'
+    + skipped.map((item) => escapeHtml(item.name) + "（" + escapeHtml(item.status) + "）").join("、")
     + '</p>';
 }
 
 function verdictBlock(matches) {
   if (!matches || !matches.length) {
-    return '<p class="empty-state">No usable candidates.</p>';
+    return '<p class="empty-state">没有可用候选。</p>';
   }
   const best = matches[0];
   return `<div class="verdict d-flex flex-wrap align-items-center justify-content-between gap-3">
       <div>
-        <div class="form-text mb-1">Closest match</div>
+        <div class="form-text mb-1">最像的是</div>
         <div class="who">${escapeHtml(best.candidate)}</div>
       </div>
       <div class="text-end">
-        <div class="form-text mb-1">Similarity</div>
+        <div class="form-text mb-1">相似度</div>
         <div style="font-size:2.4rem;color:#7a2e0a">${best.similarity.toFixed(2)}%</div>
       </div>
     </div>`;
@@ -909,11 +876,11 @@ function renderSingle(payload) {
 function renderPayload(payload) {
   $("resultAlert").innerHTML = "";
   const meta = [];
-  if (payload.query) meta.push("Query: " + payload.query);
-  if (payload.elapsed_ms != null) meta.push("Total " + payload.elapsed_ms + " ms");
-  if (payload.count != null) meta.push("Processed " + payload.count);
-  if (payload.library_faces != null) meta.push("Library " + payload.library_faces + " faces");
-  if (payload.library_images != null) meta.push("Library " + payload.library_images + " images");
+  if (payload.query) meta.push("查询：" + payload.query);
+  if (payload.elapsed_ms != null) meta.push("总耗时 " + payload.elapsed_ms + " ms");
+  if (payload.count != null) meta.push("已处理 " + payload.count + " 张");
+  if (payload.library_faces != null) meta.push("人脸库 " + payload.library_faces + " 张脸");
+  if (payload.library_images != null) meta.push("人脸库 " + payload.library_images + " 张图");
   $("resultMeta").textContent = meta.join(" · ");
 
   renderSingle(payload);
@@ -928,10 +895,10 @@ async function postJson(url, formData, button, idleText) {
     try {
       payload = await response.json();
     } catch (parseError) {
-      throw new Error("The server returned a response that could not be parsed (HTTP " + response.status + ")");
+      throw new Error("服务器返回了无法解析的内容（HTTP " + response.status + "）");
     }
     if (!response.ok || payload.ok === false) {
-      throw new Error(payload.error || ("Request failed (HTTP " + response.status + ")"));
+      throw new Error(payload.error || ("请求失败（HTTP " + response.status + "）"));
     }
     renderPayload(payload);
   } catch (error) {
@@ -947,7 +914,7 @@ function bindForm(formId, buttonId, url, idleText, requiredIds) {
     const form = event.target;
     for (const id of requiredIds) {
       if (!form.querySelector("#" + id).files.length) {
-        showError("Please choose the images this panel needs first");
+        showError("请先选择这个面板需要的图片");
         return;
       }
     }
@@ -955,9 +922,9 @@ function bindForm(formId, buttonId, url, idleText, requiredIds) {
   });
 }
 
-bindForm("queryForm", "querySubmit", "/api/query-set", "Start comparison",
+bindForm("queryForm", "querySubmit", "/api/query-set", "开始比对",
          ["queryFile", "candidateFiles"]);
-bindForm("libraryForm", "librarySubmit", "/api/query-library", "Search library",
+bindForm("libraryForm", "librarySubmit", "/api/query-library", "搜索人脸库",
          ["libraryQuery"]);
 
 document.querySelectorAll('input[type="file"]').forEach((input) => {
@@ -966,10 +933,10 @@ document.querySelectorAll('input[type="file"]').forEach((input) => {
     const summary = document.querySelector('[data-summary="' + input.id + '"]');
     if (summary && input.multiple) {
       summary.textContent = picked.length
-        ? picked.length + " images selected"
-        : "Nothing selected yet";
+        ? "已选择 " + picked.length + " 张图片"
+        : "尚未选择";
     } else if (summary && picked.length) {
-      summary.textContent = "Selected: " + picked[0].name;
+      summary.textContent = "已选择：" + picked[0].name;
     }
     const preview = document.querySelector('[data-preview="' + input.id + '"]');
     if (!preview) return;
@@ -989,10 +956,10 @@ function loadLibraryStatus() {
     .then((response) => response.json())
     .then((payload) => {
       $("libraryBadge").textContent = payload.ok
-        ? "Library: " + payload.faces + " faces / " + payload.images + " images"
-        : "Library unavailable";
+        ? "人脸库 " + payload.faces + " 张人脸 / " + payload.images + " 张图"
+        : "人脸库不可用";
     })
-    .catch(() => { $("libraryBadge").textContent = "Library status unknown"; });
+    .catch(() => { $("libraryBadge").textContent = "人脸库状态未知"; });
 }
 
 loadLibraryStatus();
@@ -1004,21 +971,19 @@ loadLibraryStatus();
 
 @app.get("/")
 def index():
-    """The page itself, both panels included. There is no detection mode
-    picker on this page.
+    """页面本身，两个面板都在上面。这页没有检测方式下拉框。
 
-    The three numbers are the initial value and the bounds of the "results to
-    return" input, kept in step with the limits in top_results_from_request.
+    三个数字是页面上"显示前几名"那个输入框的初值和上下限，和
+    top_results_from_request 里的边界保持一致。
     """
     return render_template_string(PAGE, top_results=10, top_results_min=1, top_results_max=100)
 
 
 @app.get("/api/library")
 def api_library():
-    """How many images and faces the library holds.
+    """人脸库里有多少张图、多少张脸。
 
-    Only the counts are returned; the folder path itself never leaves the
-    server.
+    只回数字，文件夹路径本身永远不离开服务器。
     """
     _labels, embedding_matrix = load_library()
     return jsonify(
@@ -1032,7 +997,7 @@ def api_library():
 
 @app.post("/api/query-set")
 def api_query_set():
-    """Panel 1: the query image against the candidate images uploaded with it."""
+    """面板一：查询图跟这次一起上传的候选图比。"""
     import time
 
     started = time.perf_counter()
@@ -1040,23 +1005,23 @@ def api_query_set():
 
     uploads = read_uploads("candidates")
     if not uploads:
-        raise RequestError("Please choose at least one candidate image")
+        raise RequestError("请至少选择一张候选图片")
 
-    # An unusable image is recorded and skipped; the whole comparison goes on.
+    # 有一张图不能用就记下来跳过，不影响整次比对。
     labels = []
     candidate_faces = []
     skipped = []
     for name, data in uploads:
         try:
-            faces = encode_upload(data, "Candidate image", name)
+            faces = encode_upload(data, "候选图片", name)
         except RequestError as error:
             skipped.append({"name": name, "status": str(error)})
             continue
         labels.append(name)
-        candidate_faces.append(faces[0])        # the biggest face in that photo
+        candidate_faces.append(faces[0])        # 这张照片里最大的那张脸
 
     if not candidate_faces:
-        raise RequestError("No usable face in the candidate images")
+        raise RequestError("候选图片里没有可用的人脸")
 
     return jsonify(
         {
@@ -1070,7 +1035,7 @@ def api_query_set():
                 query_faces,
                 disambiguate(labels),
                 candidate_faces,
-                "Uploaded candidate",
+                "候选图片",
                 top_results_from_request(),
             ),
             "skipped": skipped,
@@ -1081,18 +1046,18 @@ def api_query_set():
 
 @app.post("/api/query-library")
 def api_query_library():
-    """Panel 2: the query image against every image of the face library."""
+    """面板二：查询图跟人脸库里每一张图比。"""
     import time
 
     started = time.perf_counter()
     query_name, query_faces = query_from_request()
 
     if not library_images():
-        raise RequestError("The face library has no images; add some images first and try again")
+        raise RequestError("人脸库里没有图片，请先放入图片后重试")
 
     labels, embedding_matrix = load_library()
     if embedding_matrix.shape[0] == 0:
-        raise RequestError("No face detected in the face library; add images that contain faces first and try again")
+        raise RequestError("人脸库里没有检测到人脸，请先放入带人脸的图片后重试")
 
     return jsonify(
         {
@@ -1106,7 +1071,7 @@ def api_query_library():
                 query_faces,
                 labels,
                 embedding_matrix,
-                "Library candidate",
+                "库中候选",
                 top_results_from_request(),
             ),
             "elapsed_ms": int((time.perf_counter() - started) * 1000),
@@ -1115,27 +1080,25 @@ def api_query_library():
 
 
 # =============================================================================
-# Startup
+# 启动
 # =============================================================================
 
 
 def ask_library_folder() -> Path:
-    """Ask once at startup where the face library is; pressing Enter uses
-    face_library next to this script.
+    """启动时问一句人脸库在哪儿，直接回车就用脚本同级的 face_library。
 
-    When there is no window to ask in (double clicked, or started by another
-    program) nothing is asked and the default location is used, rather than
-    reading from an input stream that is already closed.
+    没有可问的窗口时（比如双击运行或者被别的程序拉起来）不问，直接用默认
+    位置，不去读一个已经关掉的输入流。
     """
     default = SCRIPT_DIRECTORY / "face_library"
     if not sys.stdin.isatty():
         default.mkdir(parents=True, exist_ok=True)
         return default
 
-    print("The face library is just a folder of images; subfolders are fine.")
-    print(f"Supported formats: {' '.join(sorted(SUPPORTED_EXTENSIONS))}")
+    print("人脸库就是放图片的文件夹，可以有子目录。")
+    print(f"支持的格式：{' '.join(sorted(SUPPORTED_EXTENSIONS))}")
     while True:
-        answer = input(f"Face library folder (press Enter for {default}): ").strip()
+        answer = input(f"人脸库文件夹（直接回车用 {default}）：").strip()
         if not answer:
             default.mkdir(parents=True, exist_ok=True)
             return default
@@ -1143,42 +1106,41 @@ def ask_library_folder() -> Path:
         if folder.is_dir():
             return folder
         if folder.exists():
-            print("That is a file, not a folder. Please enter it again.")
+            print("那是一个文件，不是文件夹，请再输入一次。")
         else:
-            print("That folder does not exist. Please check the path and enter it again.")
+            print("这个文件夹不存在，请检查路径后再输入一次。")
 
 
 def choose_port(preferred: int = 5000) -> int:
-    """Find a free port at or after the preferred one.
+    """从 preferred 往后找一个没人占的端口。
 
-    Port 5000 is often taken by something else, so the next one is used
-    automatically instead of failing to start.
+    5000 经常被别人占着，占了就自动往后挪，免得启动失败。
     """
     for port in range(preferred, preferred + 20):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-            # No SO_REUSEADDR here: on Windows it would let this probe bind a
-            # port another process is already listening on.
+            # 这里不设 SO_REUSEADDR：Windows 上设了会让这个探测占到别的
+            # 程序正在监听的端口。
             try:
                 probe.bind(("127.0.0.1", port))
             except OSError:
                 continue
             return port
-    raise RuntimeError(f"No free port between {preferred} and {preferred + 19}")
+    raise RuntimeError(f"{preferred} 到 {preferred + 19} 之间没有空闲端口")
 
 
 def main():
-    """Ask where the face library is, load the models, then serve the page."""
+    """问清楚人脸库在哪儿，加载模型，然后把网页服务跑起来。"""
     global LIBRARY_FOLDER
     LIBRARY_FOLDER = ask_library_folder()
 
-    print("Loading the buffalo_l models, about 2 seconds...", flush=True)
+    print("正在加载 buffalo_l 模型，约 2 秒…", flush=True)
     load_model()
-    print("Models loaded")
+    print("模型加载完成")
     print(MODEL_SUMMARY, flush=True)
-    print(f"Face library: {LIBRARY_FOLDER}", flush=True)
+    print(f"人脸库目录: {LIBRARY_FOLDER}", flush=True)
 
     images = library_images()
-    print(f"The face library currently holds {len(images)} images", flush=True)
+    print(f"人脸库里现在有 {len(images)} 张图片", flush=True)
 
     port = choose_port()
     print(f"Open http://127.0.0.1:{port} in your browser", flush=True)
